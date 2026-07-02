@@ -3,7 +3,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from main import MainWindow
 from models import BoardStatus
@@ -484,6 +484,8 @@ def test_start_firmware_update_runs_mock_flow(tmp_path) -> None:
         assert "FINISH_UPDATE OK metadata valid" in log_text
         assert "FIRMWARE_UPDATE DONE" in log_text
         assert window.update_progress.value() == 100
+        assert window.update_state == "DONE"
+        assert window.update_state_label.text() == "DONE"
         assert not window.abort_update_button.isEnabled()
         assert window.reset_to_app_button.isEnabled()
     finally:
@@ -536,6 +538,7 @@ def test_abort_update_mid_write_stops_further_chunks(tmp_path) -> None:
         assert "Firmware update aborted by user." in log_text
         assert "Firmware update stopped after user abort." in log_text
         assert "ERROR firmware update stopped" not in log_text
+        assert window.update_state == "ABORTED"
         assert window.start_update_button.isEnabled()
         assert not window.abort_update_button.isEnabled()
         assert not window.reset_to_app_button.isEnabled()
@@ -578,6 +581,87 @@ def test_late_write_bad_state_after_abort_is_ignored(tmp_path) -> None:
         assert "Firmware update aborted by user." in log_text
         assert "Late WRITE_CHUNK response ignored after abort." in log_text
         assert "ERROR firmware update stopped" not in log_text
+        assert window.update_state == "ABORTED"
+    finally:
+        window.rx_timer.stop()
+        window.close()
+        app.processEvents()
+
+
+def test_force_bad_crc_stops_before_finish_and_disables_reset(tmp_path, monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args, **kwargs: QMessageBox.StandardButton.Ok)
+
+    app_bin = (
+        (0x20001000).to_bytes(4, "little") +
+        (0x08004101).to_bytes(4, "little") +
+        bytes(range(32))
+    )
+    app_path = tmp_path / "app.bin"
+    app_path.write_bytes(app_bin)
+
+    try:
+        window.connect_can()
+        window.poll_rx()
+        window.load_app_bin(str(app_path))
+        window.force_bad_crc_check.setChecked(True)
+
+        window.start_firmware_update(confirm=False)
+
+        log_text = window.log_text.toPlainText()
+        sent_commands = [frame.data[0] for frame in window.driver.tx_frames if frame.data]
+        assert 0x33 in sent_commands
+        assert 0x34 not in sent_commands
+        assert "Force Bad CRC enabled" in log_text
+        assert "VERIFY_CRC failed: CRC_MISMATCH" in log_text
+        assert "FINISH_UPDATE OK metadata valid" not in log_text
+        assert window.update_state == "FAILED"
+        assert window.start_update_button.isEnabled()
+        assert not window.reset_to_app_button.isEnabled()
+    finally:
+        window.rx_timer.stop()
+        window.close()
+        app.processEvents()
+
+
+def test_stop_after_chunks_stops_without_abort_for_power_loss_test(tmp_path) -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+
+    app_bin = (
+        (0x20001000).to_bytes(4, "little") +
+        (0x08004101).to_bytes(4, "little") +
+        bytes(range(80))
+    )
+    app_path = tmp_path / "app.bin"
+    app_path.write_bytes(app_bin)
+
+    try:
+        window.connect_can()
+        window.poll_rx()
+        window.load_app_bin(str(app_path))
+        window.stop_after_chunks_spin.setValue(3)
+
+        window.start_firmware_update(confirm=False)
+
+        log_text = window.log_text.toPlainText()
+        write_sequences = [
+            int.from_bytes(frame.data[1:3], "little")
+            for frame in window.driver.tx_frames
+            if frame.data and frame.data[0] == 0x32
+        ]
+        sent_commands = [frame.data[0] for frame in window.driver.tx_frames if frame.data]
+
+        assert write_sequences == [0, 1, 2]
+        assert 0x35 not in sent_commands
+        assert 0x33 not in sent_commands
+        assert 0x34 not in sent_commands
+        assert "Advanced stop after 3 chunks reached" in log_text
+        assert "No ABORT_UPDATE sent" in log_text
+        assert window.update_state == "FAILED"
+        assert window.start_update_button.isEnabled()
+        assert not window.reset_to_app_button.isEnabled()
     finally:
         window.rx_timer.stop()
         window.close()

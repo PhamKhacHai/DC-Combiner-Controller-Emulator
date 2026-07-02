@@ -242,6 +242,12 @@ def test_mock_driver_abort_update_active_session_returns_ok() -> None:
     assert controller.last_simple_update_response is not None
     assert controller.last_simple_update_response.status_text == "OK"
 
+    controller.send_reset_to_app()
+    controller.poll_rx()
+
+    assert controller.last_simple_update_response is not None
+    assert controller.last_simple_update_response.status_text == "APP_INVALID"
+
 
 def test_mock_driver_abort_update_idle_returns_bad_state() -> None:
     driver = MockCanDriver()
@@ -272,3 +278,75 @@ def test_mock_driver_rejects_wrong_write_sequence() -> None:
     assert controller.last_write_chunk_response is not None
     assert controller.last_write_chunk_response.status_text == "BAD_SEQUENCE"
     assert controller.last_write_chunk_response.next_sequence == 0
+
+    controller.send_write_chunk(0, b"abcd")
+    controller.poll_rx()
+
+    assert controller.last_write_chunk_response is not None
+    assert controller.last_write_chunk_response.status_text == "OK"
+    assert controller.last_write_chunk_response.next_sequence == 1
+
+
+def test_mock_driver_crc_mismatch_blocks_finish_reset_and_allows_retry() -> None:
+    driver = MockCanDriver()
+    controller = ControllerSimulator(driver)
+    app_bin = (
+        (0x20001000).to_bytes(4, "little") +
+        (0x08004101).to_bytes(4, "little") +
+        bytes(range(16))
+    )
+
+    controller.connect("Mock CAN Device")
+    controller.poll_rx()
+
+    controller.send_start_update(len(app_bin))
+    controller.poll_rx()
+    controller.send_erase_app()
+    controller.poll_rx()
+
+    for sequence, offset in enumerate(range(0, len(app_bin), 4)):
+        controller.send_write_chunk(sequence, app_bin[offset:offset + 4])
+        controller.poll_rx()
+
+    from protocol import crc32_ieee
+
+    controller.send_verify_crc(crc32_ieee(app_bin) ^ 0x00000001)
+    controller.poll_rx()
+    assert controller.last_verify_crc_response is not None
+    assert controller.last_verify_crc_response.status_text == "CRC_MISMATCH"
+
+    controller.send_finish_update()
+    controller.poll_rx()
+    assert controller.last_simple_update_response is not None
+    assert controller.last_simple_update_response.status_text == "BAD_STATE"
+
+    controller.send_reset_to_app()
+    controller.poll_rx()
+    assert controller.last_simple_update_response is not None
+    assert controller.last_simple_update_response.status_text == "APP_INVALID"
+
+    controller.send_start_update(len(app_bin))
+    controller.poll_rx()
+    assert controller.last_start_update_response is not None
+    assert controller.last_start_update_response.status_text == "OK"
+    controller.send_erase_app()
+    controller.poll_rx()
+
+    for sequence, offset in enumerate(range(0, len(app_bin), 4)):
+        controller.send_write_chunk(sequence, app_bin[offset:offset + 4])
+        controller.poll_rx()
+
+    controller.send_verify_crc(crc32_ieee(app_bin))
+    controller.poll_rx()
+    assert controller.last_verify_crc_response is not None
+    assert controller.last_verify_crc_response.status_text == "OK"
+
+    controller.send_finish_update()
+    controller.poll_rx()
+    assert controller.last_simple_update_response is not None
+    assert controller.last_simple_update_response.status_text == "OK"
+
+    controller.send_reset_to_app()
+    controller.poll_rx()
+    assert controller.last_simple_update_response is not None
+    assert controller.last_simple_update_response.status_text == "OK"

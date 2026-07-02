@@ -95,6 +95,10 @@ class FirmwareUpdateAborted(RuntimeError):
     pass
 
 
+class FirmwareUpdateStoppedForTest(RuntimeError):
+    pass
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -133,6 +137,7 @@ class MainWindow(QMainWindow):
         self.update_in_progress = False
         self.update_abort_requested = False
         self.reset_to_app_allowed = True
+        self.update_state = "IDLE"
 
         self._build_ui()
         self.refresh_devices()
@@ -280,11 +285,18 @@ class MainWindow(QMainWindow):
         self.reset_to_app_button = QPushButton("Reset To App")
         self.reset_to_app_button.clicked.connect(self.reset_to_app)
 
+        self.update_state_label = QLabel(self.update_state)
         self.app_bin_path_label = QLabel("-")
         self.app_bin_info_label = QLabel("No app .bin selected")
         self.update_progress = QProgressBar()
         self.update_progress.setRange(0, 100)
         self.update_progress.setValue(0)
+        self.stop_after_chunks_spin = QSpinBox()
+        self.stop_after_chunks_spin.setRange(0, 65535)
+        self.stop_after_chunks_spin.setValue(0)
+        self.stop_after_chunks_spin.setSpecialValueText("Disabled")
+        self.stop_after_chunks_spin.setSuffix(" chunks")
+        self.force_bad_crc_check = QCheckBox("Force Bad CRC")
 
         layout.addWidget(self.bootloader_button, 0, 0)
         layout.addWidget(self.boot_info_button, 0, 1)
@@ -299,6 +311,12 @@ class MainWindow(QMainWindow):
         layout.addWidget(QLabel("Validation"), 3, 0)
         layout.addWidget(self.app_bin_info_label, 3, 1, 1, 3)
         layout.addWidget(self.update_progress, 4, 0, 1, 4)
+        layout.addWidget(QLabel("State"), 5, 0)
+        layout.addWidget(self.update_state_label, 5, 1, 1, 3)
+        layout.addWidget(QLabel("Advanced/Test"), 6, 0)
+        layout.addWidget(QLabel("Stop After N Chunks"), 6, 1)
+        layout.addWidget(self.stop_after_chunks_spin, 6, 2)
+        layout.addWidget(self.force_bad_crc_check, 6, 3)
         return box
 
     def _build_status_section(self) -> QGroupBox:
@@ -497,6 +515,7 @@ class MainWindow(QMainWindow):
         self.diag_request_queue.clear()
         self.diag_queue_timer.stop()
         self.reset_request_tracking()
+        self.set_update_state("IDLE")
         self.refresh_devices()
 
     def refresh_devices(self) -> None:
@@ -538,6 +557,7 @@ class MainWindow(QMainWindow):
             f"Connected mode={self.driver_mode.currentText()} device={self.device_combo.currentText()} "
             f"channel={self.channel_spin.value()} bitrate={self.bitrate_spin.value()}"
         )
+        self.set_update_state("IDLE")
         self.controller.last_diag_response = None
         self.controller.diag_response_history.clear()
         self.controller.last_boot_info_response = None
@@ -567,15 +587,16 @@ class MainWindow(QMainWindow):
         self.diag_queue_timer.stop()
         self.controller.disconnect()
         self.log_message("Disconnected")
+        self.set_update_state("IDLE")
         self.update_connected_state()
 
     def update_connected_state(self) -> None:
         connected = self.controller.connected
         self.connect_button.setEnabled(not connected)
         self.disconnect_button.setEnabled(connected)
-        self.bootloader_button.setEnabled(connected)
-        self.boot_info_button.setEnabled(connected)
-        self.flash_layout_button.setEnabled(connected)
+        self.bootloader_button.setEnabled(connected and not self.update_in_progress)
+        self.boot_info_button.setEnabled(connected and not self.update_in_progress)
+        self.flash_layout_button.setEnabled(connected and not self.update_in_progress)
         self.flash_self_test_button.setEnabled(False)
         self.select_app_bin_button.setEnabled(not self.update_in_progress)
         self.start_update_button.setEnabled(
@@ -590,12 +611,19 @@ class MainWindow(QMainWindow):
         self.reset_to_app_button.setEnabled(
             connected and not self.update_in_progress and self.reset_to_app_allowed
         )
+        self.stop_after_chunks_spin.setEnabled(not self.update_in_progress)
+        self.force_bad_crc_check.setEnabled(not self.update_in_progress)
         for widget in self.diag_connected_widgets:
             widget.setEnabled(connected)
         if not connected and self.diag_auto_check.isChecked():
             self.diag_auto_check.blockSignals(True)
             self.diag_auto_check.setChecked(False)
             self.diag_auto_check.blockSignals(False)
+
+    def set_update_state(self, state: str) -> None:
+        self.update_state = state
+        if hasattr(self, "update_state_label"):
+            self.update_state_label.setText(state)
 
     def start_periodic(self) -> None:
         if not self.ensure_connected():
@@ -692,12 +720,14 @@ class MainWindow(QMainWindow):
             return None
 
         self.log_frame("TX", frame)
+        self.set_update_state("BOOTLOADER_MODE")
         return frame
 
     def get_boot_info(self) -> CanFrame | None:
         if not self.ensure_connected():
             return None
 
+        before = len(self.controller.boot_info_response_history)
         try:
             frame = self.controller.send_get_boot_info()
         except Exception as exc:
@@ -707,6 +737,10 @@ class MainWindow(QMainWindow):
 
         self.log_frame("TX", frame)
         self.poll_rx()
+        if len(self.controller.boot_info_response_history) > before:
+            response = self.controller.boot_info_response_history[-1]
+            if response.boot_mode_text == "BOOTLOADER":
+                self.set_update_state("BOOTLOADER_MODE")
         return frame
 
     def get_flash_layout(self) -> CanFrame | None:
@@ -809,13 +843,21 @@ class MainWindow(QMainWindow):
             self.log_message("ERROR Board is not in bootloader mode.")
             return False
 
+        self.set_update_state("BOOTLOADER_MODE")
         return True
 
-    def require_update_ok(self, stage_name: str, response: object) -> None:
+    def require_update_ok(self, stage_name: str, response: object, expected_crc: int | None = None) -> None:
         status = getattr(response, "status", None)
         status_text = getattr(response, "status_text", "UNKNOWN")
         if status != BOOTLOADER_UPDATE_STATUS_OK:
-            raise RuntimeError(f"{stage_name} failed: {status_text}")
+            detail = ""
+            if isinstance(response, BootloaderWriteChunkResponse):
+                detail = f" seq={response.sequence} next_seq={response.next_sequence}"
+            elif isinstance(response, BootloaderVerifyCrcResponse):
+                detail = f" actual=0x{response.actual_crc:08X}"
+                if expected_crc is not None:
+                    detail += f" expected=0x{expected_crc:08X}"
+            raise RuntimeError(f"{stage_name} failed: {status_text}{detail}")
 
     def start_firmware_update(self, confirm: bool = True) -> None:
         if not self.ensure_connected():
@@ -852,6 +894,7 @@ class MainWindow(QMainWindow):
         self.update_in_progress = True
         self.update_abort_requested = False
         self.reset_to_app_allowed = False
+        self.set_update_state("UPDATING")
         self.update_connected_state()
         self.update_progress.setValue(0)
 
@@ -859,12 +902,19 @@ class MainWindow(QMainWindow):
             self.run_update_sequence(info, self.selected_app_bin_data)
             self.update_progress.setValue(100)
             self.reset_to_app_allowed = True
+            self.set_update_state("DONE")
             self.log_message("FIRMWARE_UPDATE DONE. Use Reset To App or reset/power cycle the board.")
         except FirmwareUpdateAborted:
             self.reset_to_app_allowed = False
+            self.set_update_state("ABORTED")
             self.log_message("Firmware update stopped after user abort.")
+        except FirmwareUpdateStoppedForTest as exc:
+            self.reset_to_app_allowed = False
+            self.set_update_state("FAILED")
+            self.log_message(str(exc))
         except Exception as exc:
             self.reset_to_app_allowed = False
+            self.set_update_state("FAILED")
             self.log_message(f"ERROR firmware update stopped: {exc}")
             QMessageBox.warning(self, "Firmware update stopped", str(exc))
         finally:
@@ -877,6 +927,7 @@ class MainWindow(QMainWindow):
             raise FirmwareUpdateAborted("Firmware update aborted by user.")
 
     def run_update_sequence(self, info: AppBinInfo, data: bytes) -> None:
+        stop_after_chunks = self.stop_after_chunks_spin.value()
         self.stop_if_abort_requested("START_UPDATE")
         before = len(self.controller.start_update_response_history)
         frame = self.controller.send_start_update(info.size, 0)
@@ -923,16 +974,27 @@ class MainWindow(QMainWindow):
             self.update_progress.setValue(progress)
             if sequence == 0 or sequence + 1 == info.chunk_count or (sequence % 256) == 0:
                 self.log_message(f"WRITE seq={sequence} OK progress={progress}%")
+            if stop_after_chunks > 0 and (sequence + 1) >= stop_after_chunks:
+                raise FirmwareUpdateStoppedForTest(
+                    f"Advanced stop after {stop_after_chunks} chunks reached. "
+                    "No ABORT_UPDATE sent; reset/power-cycle the board to test recovery."
+                )
 
         self.stop_if_abort_requested("VERIFY_CRC")
         before = len(self.controller.verify_crc_response_history)
-        frame = self.controller.send_verify_crc(info.crc32)
+        verify_crc = info.crc32
+        if self.force_bad_crc_check.isChecked():
+            verify_crc ^= 0x00000001
+            self.log_message(
+                f"Force Bad CRC enabled: real=0x{info.crc32:08X} sent=0x{verify_crc:08X}"
+            )
+        frame = self.controller.send_verify_crc(verify_crc)
         self.log_frame("TX", frame)
         response = self.wait_for_history_item(self.controller.verify_crc_response_history, before, 5000)
         if not isinstance(response, BootloaderVerifyCrcResponse):
             raise TimeoutError("VERIFY_CRC timeout")
         self.stop_if_abort_requested("VERIFY_CRC")
-        self.require_update_ok("VERIFY_CRC", response)
+        self.require_update_ok("VERIFY_CRC", response, expected_crc=verify_crc)
         if response.actual_crc != info.crc32:
             raise RuntimeError(
                 f"VERIFY_CRC actual=0x{response.actual_crc:08X} expected=0x{info.crc32:08X}"
@@ -976,6 +1038,7 @@ class MainWindow(QMainWindow):
         if isinstance(response, BootloaderSimpleUpdateResponse) and response.response_type == BOOTLOADER_RESP_ABORT_UPDATE:
             if response.status == BOOTLOADER_UPDATE_STATUS_OK:
                 self.reset_to_app_allowed = False
+                self.set_update_state("ABORTED")
                 self.log_message("Firmware update aborted by user.")
             else:
                 self.log_message(f"ABORT_UPDATE {response.status_text}")
@@ -1008,6 +1071,7 @@ class MainWindow(QMainWindow):
         if isinstance(response, BootloaderSimpleUpdateResponse) and response.response_type == BOOTLOADER_RESP_RESET_TO_APP:
             if response.status == BOOTLOADER_UPDATE_STATUS_OK:
                 self.log_message("RESET_TO_APP OK")
+                self.set_update_state("IDLE")
             else:
                 self.log_message(f"RESET_TO_APP {response.status_text}")
         return frame
