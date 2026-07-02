@@ -7,18 +7,49 @@ from typing import Deque
 
 from models import CanFrame
 from protocol import (
+    APP_MAX_SIZE_BYTES,
+    BOOTLOADER_CMD_ABORT_UPDATE,
+    BOOTLOADER_CMD_ERASE_APP,
+    BOOTLOADER_CMD_FINISH_UPDATE,
     BOOTLOADER_CMD_GET_FLASH_LAYOUT,
     BOOTLOADER_CMD_GET_BOOT_INFO,
+    BOOTLOADER_CMD_RESET_TO_APP,
     BOOTLOADER_CMD_RUN_FLASH_SELF_TEST,
+    BOOTLOADER_CMD_START_UPDATE,
+    BOOTLOADER_CMD_VERIFY_CRC,
+    BOOTLOADER_CMD_WRITE_CHUNK,
     BOOTLOADER_ENTER_MAGIC_1,
     BOOTLOADER_ENTER_MAGIC_2,
     BOOTLOADER_FLASH_STATUS_BAD_MAGIC,
-    BOOTLOADER_FLASH_STATUS_OK,
+    BOOTLOADER_FLASH_STATUS_ADDRESS_RANGE_ERROR,
     BOOTLOADER_RESP_FLASH_SELF_TEST,
+    BOOTLOADER_RESP_ABORT_UPDATE,
+    BOOTLOADER_RESP_ERASE_APP,
+    BOOTLOADER_RESP_FINISH_UPDATE,
     BOOTLOADER_RESP_GET_FLASH_LAYOUT,
     BOOTLOADER_REQUEST_ID_BASE,
+    BOOTLOADER_RESP_RESET_TO_APP,
     BOOTLOADER_RESP_GET_BOOT_INFO,
+    BOOTLOADER_RESP_START_UPDATE,
+    BOOTLOADER_RESP_VERIFY_CRC,
+    BOOTLOADER_RESP_WRITE_CHUNK,
     BOOTLOADER_STATUS_OK,
+    BOOTLOADER_UPDATE_STATE_CRC_OK,
+    BOOTLOADER_UPDATE_STATE_ERASED,
+    BOOTLOADER_UPDATE_STATE_ERROR,
+    BOOTLOADER_UPDATE_STATE_FINISHED,
+    BOOTLOADER_UPDATE_STATE_IDLE,
+    BOOTLOADER_UPDATE_STATE_STARTED,
+    BOOTLOADER_UPDATE_STATE_WRITE_COMPLETE,
+    BOOTLOADER_UPDATE_STATE_WRITING,
+    BOOTLOADER_UPDATE_STATUS_ADDRESS_RANGE_ERROR,
+    BOOTLOADER_UPDATE_STATUS_APP_INVALID,
+    BOOTLOADER_UPDATE_STATUS_BAD_MAGIC,
+    BOOTLOADER_UPDATE_STATUS_BAD_SEQUENCE,
+    BOOTLOADER_UPDATE_STATUS_BAD_STATE,
+    BOOTLOADER_UPDATE_STATUS_CRC_MISMATCH,
+    BOOTLOADER_UPDATE_STATUS_OK,
+    BOOTLOADER_UPDATE_STATUS_SIZE_ERROR,
     DIAG_CMD_READ_COUNTER,
     DIAG_CMD_RESET_ALL_COUNTERS,
     DIAG_COUNTER_CAN_COMMAND_RX,
@@ -51,6 +82,7 @@ from protocol import (
     is_global_counter,
     is_group_counter,
     bootloader_response_id,
+    crc32_ieee,
     status_id,
 )
 
@@ -92,6 +124,12 @@ class MockCanDriver(CanDriver):
         self._output_mask = 0
         self._group_counters: list[dict[int, int]] = []
         self._global_counters: dict[int, int] = {}
+        self._boot_update_state = BOOTLOADER_UPDATE_STATE_IDLE
+        self._boot_update_app_size = 0
+        self._boot_update_expected_seq = 0
+        self._boot_update_data = bytearray()
+        self._boot_update_crc_ok = False
+        self._boot_app_valid = True
         self._reset_diag_counters()
 
     @property
@@ -109,6 +147,7 @@ class MockCanDriver(CanDriver):
         self._heartbeat_sequence = 0
         self._output_mask = 0
         self._reset_diag_counters()
+        self._reset_bootloader_update_state()
         self._enqueue_status(0, node_id=self._node_id)
         self._enqueue_heartbeat(node_id=self._node_id)
 
@@ -252,10 +291,38 @@ class MockCanDriver(CanDriver):
             return
 
         if len(data) == 8 and command == BOOTLOADER_CMD_RUN_FLASH_SELF_TEST:
-            if data[1] == BOOTLOADER_ENTER_MAGIC_1 and data[2] == BOOTLOADER_ENTER_MAGIC_2:
-                self._enqueue_flash_self_test_response(BOOTLOADER_FLASH_STATUS_OK, 0)
-            else:
+            if data[1] != BOOTLOADER_ENTER_MAGIC_1 or data[2] != BOOTLOADER_ENTER_MAGIC_2:
                 self._enqueue_flash_self_test_response(BOOTLOADER_FLASH_STATUS_BAD_MAGIC, 0)
+            else:
+                self._enqueue_flash_self_test_response(BOOTLOADER_FLASH_STATUS_ADDRESS_RANGE_ERROR, 0)
+            return
+
+        if len(data) == 8 and command == BOOTLOADER_CMD_START_UPDATE:
+            self._handle_start_update(data)
+            return
+
+        if len(data) == 8 and command == BOOTLOADER_CMD_ERASE_APP:
+            self._handle_erase_app(data)
+            return
+
+        if len(data) == 8 and command == BOOTLOADER_CMD_WRITE_CHUNK:
+            self._handle_write_chunk(data)
+            return
+
+        if len(data) == 8 and command == BOOTLOADER_CMD_VERIFY_CRC:
+            self._handle_verify_crc(data)
+            return
+
+        if len(data) == 8 and command == BOOTLOADER_CMD_FINISH_UPDATE:
+            self._handle_finish_update(data)
+            return
+
+        if len(data) == 8 and command == BOOTLOADER_CMD_ABORT_UPDATE:
+            self._handle_abort_update(data)
+            return
+
+        if len(data) == 8 and command == BOOTLOADER_CMD_RESET_TO_APP:
+            self._handle_reset_to_app(data)
 
     def _enqueue_diag_counter_response(
         self,
@@ -280,7 +347,7 @@ class MockCanDriver(CanDriver):
         self._enqueue_rx_frame(diag_response_id(self._node_id), data)
 
     def _enqueue_boot_info_response(self) -> None:
-        data = bytes([BOOTLOADER_RESP_GET_BOOT_INFO, BOOTLOADER_STATUS_OK, 1, 0, 1, 1, 0, 0])
+        data = bytes([BOOTLOADER_RESP_GET_BOOT_INFO, BOOTLOADER_STATUS_OK, 1, 0, 1 if self._boot_app_valid else 0, 1, 0, 0])
         self._enqueue_rx_frame(bootloader_response_id(self._node_id), data)
 
     def _enqueue_flash_layout_response(self) -> None:
@@ -289,6 +356,196 @@ class MockCanDriver(CanDriver):
 
     def _enqueue_flash_self_test_response(self, status: int, stage: int) -> None:
         data = bytes([BOOTLOADER_RESP_FLASH_SELF_TEST, status, stage, 0, 0, 0, 0, 0])
+        self._enqueue_rx_frame(bootloader_response_id(self._node_id), data)
+
+    def _reset_bootloader_update_state(self) -> None:
+        self._boot_update_state = BOOTLOADER_UPDATE_STATE_IDLE
+        self._boot_update_app_size = 0
+        self._boot_update_expected_seq = 0
+        self._boot_update_data = bytearray()
+        self._boot_update_crc_ok = False
+        self._boot_app_valid = True
+
+    def _has_boot_magic(self, data: bytes) -> bool:
+        return len(data) >= 3 and data[1] == BOOTLOADER_ENTER_MAGIC_1 and data[2] == BOOTLOADER_ENTER_MAGIC_2
+
+    def _handle_start_update(self, data: bytes) -> None:
+        app_size = int.from_bytes(data[3:7], "little")
+        flags = data[7]
+
+        if not self._has_boot_magic(data):
+            self._enqueue_start_update_response(BOOTLOADER_UPDATE_STATUS_BAD_MAGIC, app_size)
+            return
+
+        if app_size <= 8 or app_size > APP_MAX_SIZE_BYTES:
+            self._enqueue_start_update_response(BOOTLOADER_UPDATE_STATUS_SIZE_ERROR, app_size)
+            return
+
+        if flags != 0:
+            self._enqueue_start_update_response(BOOTLOADER_UPDATE_STATUS_BAD_STATE, app_size)
+            return
+
+        self._boot_update_state = BOOTLOADER_UPDATE_STATE_STARTED
+        self._boot_update_app_size = app_size
+        self._boot_update_expected_seq = 0
+        self._boot_update_data = bytearray()
+        self._boot_update_crc_ok = False
+        self._boot_app_valid = False
+        self._enqueue_start_update_response(BOOTLOADER_UPDATE_STATUS_OK, app_size)
+
+    def _handle_erase_app(self, data: bytes) -> None:
+        if not self._has_boot_magic(data):
+            self._enqueue_erase_app_response(BOOTLOADER_UPDATE_STATUS_BAD_MAGIC, 0)
+            return
+
+        if self._boot_update_state != BOOTLOADER_UPDATE_STATE_STARTED:
+            self._enqueue_erase_app_response(BOOTLOADER_UPDATE_STATUS_BAD_STATE, 0)
+            return
+
+        erased_pages = (self._boot_update_app_size + 1023) // 1024
+        self._boot_update_state = BOOTLOADER_UPDATE_STATE_ERASED
+        self._boot_update_data = bytearray()
+        self._enqueue_erase_app_response(BOOTLOADER_UPDATE_STATUS_OK, erased_pages)
+
+    def _handle_write_chunk(self, data: bytes) -> None:
+        sequence = int.from_bytes(data[1:3], "little")
+        payload_len = data[3]
+        payload = data[4:4 + min(payload_len, 4)]
+
+        if payload_len < 1 or payload_len > 4:
+            self._enqueue_write_chunk_response(BOOTLOADER_UPDATE_STATUS_SIZE_ERROR, sequence)
+            return
+
+        if self._boot_update_state not in {
+            BOOTLOADER_UPDATE_STATE_ERASED,
+            BOOTLOADER_UPDATE_STATE_WRITING,
+        }:
+            self._enqueue_write_chunk_response(BOOTLOADER_UPDATE_STATUS_BAD_STATE, sequence)
+            return
+
+        if sequence != self._boot_update_expected_seq:
+            self._enqueue_write_chunk_response(BOOTLOADER_UPDATE_STATUS_BAD_SEQUENCE, sequence)
+            return
+
+        if len(self._boot_update_data) + payload_len > self._boot_update_app_size:
+            self._enqueue_write_chunk_response(BOOTLOADER_UPDATE_STATUS_ADDRESS_RANGE_ERROR, sequence)
+            return
+
+        self._boot_update_data.extend(payload)
+        self._boot_update_expected_seq += 1
+        if len(self._boot_update_data) == self._boot_update_app_size:
+            self._boot_update_state = BOOTLOADER_UPDATE_STATE_WRITE_COMPLETE
+        else:
+            self._boot_update_state = BOOTLOADER_UPDATE_STATE_WRITING
+
+        self._enqueue_write_chunk_response(BOOTLOADER_UPDATE_STATUS_OK, sequence)
+
+    def _handle_verify_crc(self, data: bytes) -> None:
+        expected_crc = int.from_bytes(data[1:5], "little")
+        actual_crc = crc32_ieee(bytes(self._boot_update_data))
+
+        if self._boot_update_state != BOOTLOADER_UPDATE_STATE_WRITE_COMPLETE:
+            self._enqueue_verify_crc_response(BOOTLOADER_UPDATE_STATUS_BAD_STATE, actual_crc)
+            return
+
+        if len(self._boot_update_data) != self._boot_update_app_size:
+            self._enqueue_verify_crc_response(BOOTLOADER_UPDATE_STATUS_BAD_STATE, actual_crc)
+            return
+
+        if actual_crc != expected_crc:
+            self._boot_update_state = BOOTLOADER_UPDATE_STATE_ERROR
+            self._enqueue_verify_crc_response(BOOTLOADER_UPDATE_STATUS_CRC_MISMATCH, actual_crc)
+            return
+
+        self._boot_update_state = BOOTLOADER_UPDATE_STATE_CRC_OK
+        self._boot_update_crc_ok = True
+        self._enqueue_verify_crc_response(BOOTLOADER_UPDATE_STATUS_OK, actual_crc)
+
+    def _handle_finish_update(self, data: bytes) -> None:
+        if not self._has_boot_magic(data):
+            self._enqueue_simple_update_response(BOOTLOADER_RESP_FINISH_UPDATE, BOOTLOADER_UPDATE_STATUS_BAD_MAGIC)
+            return
+
+        if self._boot_update_state != BOOTLOADER_UPDATE_STATE_CRC_OK or not self._boot_update_crc_ok:
+            self._enqueue_simple_update_response(BOOTLOADER_RESP_FINISH_UPDATE, BOOTLOADER_UPDATE_STATUS_BAD_STATE)
+            return
+
+        self._boot_update_state = BOOTLOADER_UPDATE_STATE_FINISHED
+        self._boot_app_valid = True
+        self._enqueue_simple_update_response(BOOTLOADER_RESP_FINISH_UPDATE, BOOTLOADER_UPDATE_STATUS_OK)
+
+    def _handle_abort_update(self, data: bytes) -> None:
+        if not self._has_boot_magic(data):
+            self._enqueue_simple_update_response(BOOTLOADER_RESP_ABORT_UPDATE, BOOTLOADER_UPDATE_STATUS_BAD_MAGIC)
+            return
+
+        if self._boot_update_state not in {
+            BOOTLOADER_UPDATE_STATE_STARTED,
+            BOOTLOADER_UPDATE_STATE_ERASED,
+            BOOTLOADER_UPDATE_STATE_WRITING,
+            BOOTLOADER_UPDATE_STATE_WRITE_COMPLETE,
+            BOOTLOADER_UPDATE_STATE_CRC_OK,
+        }:
+            self._enqueue_simple_update_response(BOOTLOADER_RESP_ABORT_UPDATE, BOOTLOADER_UPDATE_STATUS_BAD_STATE)
+            return
+
+        self._boot_update_state = BOOTLOADER_UPDATE_STATE_ERROR
+        self._boot_app_valid = False
+        self._enqueue_simple_update_response(BOOTLOADER_RESP_ABORT_UPDATE, BOOTLOADER_UPDATE_STATUS_OK)
+
+    def _handle_reset_to_app(self, data: bytes) -> None:
+        if not self._has_boot_magic(data):
+            self._enqueue_simple_update_response(BOOTLOADER_RESP_RESET_TO_APP, BOOTLOADER_UPDATE_STATUS_BAD_MAGIC)
+            return
+
+        status = BOOTLOADER_UPDATE_STATUS_OK if self._boot_app_valid else BOOTLOADER_UPDATE_STATUS_APP_INVALID
+        self._enqueue_simple_update_response(BOOTLOADER_RESP_RESET_TO_APP, status)
+
+    def _enqueue_start_update_response(self, status: int, app_size: int) -> None:
+        data = bytes(
+            [
+                BOOTLOADER_RESP_START_UPDATE,
+                status,
+                self._boot_update_state,
+                *app_size.to_bytes(4, "little"),
+                0,
+            ]
+        )
+        self._enqueue_rx_frame(bootloader_response_id(self._node_id), data)
+
+    def _enqueue_erase_app_response(self, status: int, erased_pages: int) -> None:
+        data = bytes(
+            [
+                BOOTLOADER_RESP_ERASE_APP,
+                status,
+                self._boot_update_state,
+                *erased_pages.to_bytes(2, "little"),
+                0,
+                0,
+                0,
+            ]
+        )
+        self._enqueue_rx_frame(bootloader_response_id(self._node_id), data)
+
+    def _enqueue_write_chunk_response(self, status: int, sequence: int) -> None:
+        data = bytes(
+            [
+                BOOTLOADER_RESP_WRITE_CHUNK,
+                status,
+                *sequence.to_bytes(2, "little"),
+                *self._boot_update_expected_seq.to_bytes(2, "little"),
+                0,
+                0,
+            ]
+        )
+        self._enqueue_rx_frame(bootloader_response_id(self._node_id), data)
+
+    def _enqueue_verify_crc_response(self, status: int, actual_crc: int) -> None:
+        data = bytes([BOOTLOADER_RESP_VERIFY_CRC, status, *actual_crc.to_bytes(4, "little"), 0, 0])
+        self._enqueue_rx_frame(bootloader_response_id(self._node_id), data)
+
+    def _enqueue_simple_update_response(self, response_type: int, status: int) -> None:
+        data = bytes([response_type, status, 0, 0, 0, 0, 0, 0])
         self._enqueue_rx_frame(bootloader_response_id(self._node_id), data)
 
     def _get_counter(self, counter_id: int, group_index: int) -> tuple[int, int]:

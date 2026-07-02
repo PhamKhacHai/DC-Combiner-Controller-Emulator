@@ -98,3 +98,60 @@ class BootloaderFlashSelfTestResponse:
     stage: int
     stage_text: str
     detail: bytes
+
+
+@dataclass(slots=True)
+class BootloaderStartUpdateResponse:
+    response_type: int
+    status: int
+    status_text: str
+    stage: int
+    stage_text: str
+    app_size: int
+
+
+@dataclass(slots=True)
+class BootloaderEraseAppResponse:
+    response_type: int
+    status: int
+    status_text: str
+    stage: int
+    stage_text: str
+    erased_pages: int
+
+
+@dataclass(slots=True)
+class BootloaderWriteChunkResponse:
+    response_type: int
+    status: int
+    status_text: str
+    sequence: int
+    next_sequence: int
+    detail: bytes
+
+
+@dataclass(slots=True)
+class BootloaderVerifyCrcResponse:
+    response_type: int
+    status: int
+    status_text: str
+    actual_crc: int
+
+
+@dataclass(slots=True)
+class BootloaderSimpleUpdateResponse:
+    response_type: int
+    status: int
+    status_text: str
+
+
+@dataclass(slots=True)
+class AppBinInfo:
+    path: str
+    size: int
+    crc32: int
+    chunk_count: int
+    initial_sp: int
+    reset_handler: int
+    valid: bool
+    error: str

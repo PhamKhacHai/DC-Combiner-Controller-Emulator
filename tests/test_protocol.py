@@ -8,10 +8,17 @@ from protocol import (
     DIAG_STATUS_RESET_MAGIC_INVALID,
     bootloader_request_id,
     bootloader_response_id,
+    build_bootloader_abort_update_frame,
     build_bootloader_enter_frame,
+    build_bootloader_erase_app_frame,
+    build_bootloader_finish_update_frame,
     build_bootloader_get_flash_layout_frame,
     build_bootloader_get_info_frame,
+    build_bootloader_reset_to_app_frame,
     build_bootloader_run_flash_self_test_frame,
+    build_bootloader_start_update_frame,
+    build_bootloader_verify_crc_frame,
+    build_bootloader_write_chunk_frame,
     build_diag_read_counter_frame,
     build_diag_reset_all_frame,
     build_command_frame,
@@ -20,6 +27,9 @@ from protocol import (
     decode_bootloader_flash_layout_frame,
     decode_bootloader_flash_self_test_frame,
     decode_bootloader_info_frame,
+    decode_bootloader_start_update_frame,
+    decode_bootloader_write_chunk_frame,
+    decode_bootloader_verify_crc_frame,
     decode_diag_response_frame,
     decode_heartbeat_frame,
     decode_status_frame,
@@ -29,6 +39,7 @@ from protocol import (
     group_to_bit,
     heartbeat_id,
     status_id,
+    validate_app_bin_data,
 )
 
 
@@ -137,6 +148,20 @@ def test_bootloader_run_flash_self_test_frame() -> None:
     assert frame.rtr is False
 
 
+def test_bootloader_update_command_frames() -> None:
+    frame = build_bootloader_start_update_frame(2, 0x1234)
+    assert frame.can_id == 0x552
+    assert frame.data == bytes([0x30, 0xA5, 0x5A, 0x34, 0x12, 0, 0, 0])
+    assert frame.dlc == 8
+
+    assert build_bootloader_erase_app_frame(2).data == bytes([0x31, 0xA5, 0x5A, 0, 0, 0, 0, 0])
+    assert build_bootloader_write_chunk_frame(2, 3, b"abc").data == bytes([0x32, 3, 0, 3, 0x61, 0x62, 0x63, 0xFF])
+    assert build_bootloader_verify_crc_frame(2, 0x89ABCDEF).data == bytes([0x33, 0xEF, 0xCD, 0xAB, 0x89, 0, 0, 0])
+    assert build_bootloader_finish_update_frame(2).data == bytes([0x34, 0xA5, 0x5A, 0, 0, 0, 0, 0])
+    assert build_bootloader_abort_update_frame(2).data == bytes([0x35, 0xA5, 0x5A, 0, 0, 0, 0, 0])
+    assert build_bootloader_reset_to_app_frame(2).data == bytes([0x36, 0xA5, 0x5A, 0, 0, 0, 0, 0])
+
+
 def test_bootloader_info_response_decode() -> None:
     frame = CanFrame(can_id=0x560, data=bytes([0x91, 0x00, 1, 0, 1, 1, 0, 0]), dlc=8)
     response = decode_bootloader_info_frame(frame, 0)
@@ -166,6 +191,62 @@ def test_bootloader_flash_self_test_response_decode() -> None:
     assert response.status_text == "OK"
     assert response.stage_text == "DONE"
     assert response.detail == bytes([0, 0, 0, 0, 0])
+
+
+def test_bootloader_update_response_decode() -> None:
+    start = decode_bootloader_start_update_frame(
+        CanFrame(can_id=0x560, data=bytes([0xB0, 0x00, 1, 0x34, 0x12, 0, 0, 0]), dlc=8),
+        0,
+    )
+    assert start is not None
+    assert start.status_text == "OK"
+    assert start.stage_text == "STARTED"
+    assert start.app_size == 0x1234
+
+    write = decode_bootloader_write_chunk_frame(
+        CanFrame(can_id=0x560, data=bytes([0xB2, 0x0B, 3, 0, 4, 0, 0, 0]), dlc=8),
+        0,
+    )
+    assert write is not None
+    assert write.status_text == "BAD_SEQUENCE"
+    assert write.sequence == 3
+    assert write.next_sequence == 4
+
+    verify = decode_bootloader_verify_crc_frame(
+        CanFrame(can_id=0x560, data=bytes([0xB3, 0, 0xEF, 0xCD, 0xAB, 0x89, 0, 0]), dlc=8),
+        0,
+    )
+    assert verify is not None
+    assert verify.actual_crc == 0x89ABCDEF
+
+
+def test_validate_app_bin_data_accepts_relocated_app_vector() -> None:
+    app_bin = (
+        (0x20001000).to_bytes(4, "little") +
+        (0x08004101).to_bytes(4, "little") +
+        bytes(range(16))
+    )
+
+    info = validate_app_bin_data(app_bin, "app.bin")
+
+    assert info.valid is True
+    assert info.size == len(app_bin)
+    assert info.chunk_count == 6
+    assert info.initial_sp == 0x20001000
+    assert info.reset_handler == 0x08004101
+
+
+def test_validate_app_bin_data_rejects_bad_vector() -> None:
+    app_bin = (
+        (0x10000000).to_bytes(4, "little") +
+        (0x08004100).to_bytes(4, "little") +
+        bytes(range(16))
+    )
+
+    info = validate_app_bin_data(app_bin, "bad.bin")
+
+    assert info.valid is False
+    assert "Initial SP" in info.error
 
 
 def test_diag_counter_response_decode() -> None:

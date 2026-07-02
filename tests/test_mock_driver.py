@@ -168,5 +168,107 @@ def test_controller_run_flash_self_test_receives_mock_response() -> None:
     assert tx_frame.data == bytes([0x20, 0xA5, 0x5A, 0, 0, 0, 0, 0])
     assert any(frame.can_id == 0x563 for frame in rx_frames)
     assert controller.last_flash_self_test_response is not None
-    assert controller.last_flash_self_test_response.status_text == "OK"
+    assert controller.last_flash_self_test_response.status_text == "ADDRESS_RANGE_ERROR"
     assert controller.last_flash_self_test_response.stage_text == "DONE"
+
+
+def test_mock_driver_accepts_firmware_update_flow() -> None:
+    driver = MockCanDriver()
+    controller = ControllerSimulator(driver)
+    app_bin = (
+        (0x20001000).to_bytes(4, "little") +
+        (0x08004101).to_bytes(4, "little") +
+        bytes(range(16))
+    )
+
+    controller.connect("Mock CAN Device")
+    controller.poll_rx()
+    controller.set_node_id(3)
+
+    controller.send_start_update(len(app_bin))
+    controller.poll_rx()
+    assert controller.last_start_update_response is not None
+    assert controller.last_start_update_response.status_text == "OK"
+
+    controller.send_erase_app()
+    controller.poll_rx()
+    assert controller.last_erase_app_response is not None
+    assert controller.last_erase_app_response.status_text == "OK"
+
+    for sequence, offset in enumerate(range(0, len(app_bin), 4)):
+        controller.send_write_chunk(sequence, app_bin[offset:offset + 4])
+        controller.poll_rx()
+        assert controller.last_write_chunk_response is not None
+        assert controller.last_write_chunk_response.status_text == "OK"
+        assert controller.last_write_chunk_response.next_sequence == sequence + 1
+
+    from protocol import crc32_ieee
+
+    controller.send_verify_crc(crc32_ieee(app_bin))
+    controller.poll_rx()
+    assert controller.last_verify_crc_response is not None
+    assert controller.last_verify_crc_response.status_text == "OK"
+
+    controller.send_finish_update()
+    controller.poll_rx()
+    assert controller.last_simple_update_response is not None
+    assert controller.last_simple_update_response.status_text == "OK"
+
+    controller.send_abort_update()
+    controller.poll_rx()
+    assert controller.last_simple_update_response is not None
+    assert controller.last_simple_update_response.status_text == "BAD_STATE"
+
+    controller.send_get_boot_info()
+    controller.poll_rx()
+    assert controller.last_boot_info_response is not None
+    assert controller.last_boot_info_response.app_valid is True
+
+
+def test_mock_driver_abort_update_active_session_returns_ok() -> None:
+    driver = MockCanDriver()
+    controller = ControllerSimulator(driver)
+    controller.connect("Mock CAN Device")
+    controller.poll_rx()
+
+    controller.send_start_update(16)
+    controller.poll_rx()
+    controller.send_erase_app()
+    controller.poll_rx()
+
+    controller.send_abort_update()
+    controller.poll_rx()
+
+    assert controller.last_simple_update_response is not None
+    assert controller.last_simple_update_response.status_text == "OK"
+
+
+def test_mock_driver_abort_update_idle_returns_bad_state() -> None:
+    driver = MockCanDriver()
+    controller = ControllerSimulator(driver)
+    controller.connect("Mock CAN Device")
+    controller.poll_rx()
+
+    controller.send_abort_update()
+    controller.poll_rx()
+
+    assert controller.last_simple_update_response is not None
+    assert controller.last_simple_update_response.status_text == "BAD_STATE"
+
+
+def test_mock_driver_rejects_wrong_write_sequence() -> None:
+    driver = MockCanDriver()
+    controller = ControllerSimulator(driver)
+    controller.connect("Mock CAN Device")
+    controller.poll_rx()
+
+    controller.send_start_update(16)
+    controller.poll_rx()
+    controller.send_erase_app()
+    controller.poll_rx()
+    controller.send_write_chunk(1, b"abcd")
+    controller.poll_rx()
+
+    assert controller.last_write_chunk_response is not None
+    assert controller.last_write_chunk_response.status_text == "BAD_SEQUENCE"
+    assert controller.last_write_chunk_response.next_sequence == 0

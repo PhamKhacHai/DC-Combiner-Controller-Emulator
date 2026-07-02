@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+import binascii
 import time
 
 from models import (
+    AppBinInfo,
     BoardStatus,
+    BootloaderEraseAppResponse,
     BootloaderFlashLayoutResponse,
     BootloaderFlashSelfTestResponse,
     BootloaderInfoResponse,
+    BootloaderSimpleUpdateResponse,
+    BootloaderStartUpdateResponse,
+    BootloaderVerifyCrcResponse,
+    BootloaderWriteChunkResponse,
     CanFrame,
     DiagnosticCounterResponse,
     DiagnosticErrorResponse,
@@ -58,20 +65,95 @@ BOOTLOADER_CMD_ENTER = 0x10
 BOOTLOADER_CMD_GET_BOOT_INFO = 0x11
 BOOTLOADER_CMD_GET_FLASH_LAYOUT = 0x12
 BOOTLOADER_CMD_RUN_FLASH_SELF_TEST = 0x20
+BOOTLOADER_CMD_START_UPDATE = 0x30
+BOOTLOADER_CMD_ERASE_APP = 0x31
+BOOTLOADER_CMD_WRITE_CHUNK = 0x32
+BOOTLOADER_CMD_VERIFY_CRC = 0x33
+BOOTLOADER_CMD_FINISH_UPDATE = 0x34
+BOOTLOADER_CMD_ABORT_UPDATE = 0x35
+BOOTLOADER_CMD_RESET_TO_APP = 0x36
 BOOTLOADER_ENTER_MAGIC_1 = 0xA5
 BOOTLOADER_ENTER_MAGIC_2 = 0x5A
 BOOTLOADER_RESP_GET_BOOT_INFO = 0x91
 BOOTLOADER_RESP_GET_FLASH_LAYOUT = 0x92
 BOOTLOADER_RESP_FLASH_SELF_TEST = 0xA0
+BOOTLOADER_RESP_START_UPDATE = 0xB0
+BOOTLOADER_RESP_ERASE_APP = 0xB1
+BOOTLOADER_RESP_WRITE_CHUNK = 0xB2
+BOOTLOADER_RESP_VERIFY_CRC = 0xB3
+BOOTLOADER_RESP_FINISH_UPDATE = 0xB4
+BOOTLOADER_RESP_ABORT_UPDATE = 0xB5
+BOOTLOADER_RESP_RESET_TO_APP = 0xB6
 BOOTLOADER_STATUS_OK = 0x00
 BOOTLOADER_STATUS_UNKNOWN_COMMAND = 0x01
 BOOTLOADER_STATUS_BAD_DLC = 0x02
 BOOTLOADER_MODE_ACTIVE = 0x01
 
+APP_BASE_ADDR = 0x08004000
+APP_END_ADDR = 0x0800FBFF
+APP_MAX_SIZE_BYTES = 47 * 1024
+SRAM_START_ADDR = 0x20000000
+SRAM_END_ADDR = 0x20005000
+BOOTLOADER_WRITE_CHUNK_PAYLOAD_SIZE = 4
+
 BOOTLOADER_STATUS_TEXT: dict[int, str] = {
     BOOTLOADER_STATUS_OK: "OK",
     BOOTLOADER_STATUS_UNKNOWN_COMMAND: "UNKNOWN_COMMAND",
     BOOTLOADER_STATUS_BAD_DLC: "BAD_DLC",
+}
+
+BOOTLOADER_UPDATE_STATUS_OK = 0x00
+BOOTLOADER_UPDATE_STATUS_UNKNOWN_COMMAND = 0x01
+BOOTLOADER_UPDATE_STATUS_BAD_DLC = 0x02
+BOOTLOADER_UPDATE_STATUS_BAD_MAGIC = 0x03
+BOOTLOADER_UPDATE_STATUS_BAD_STATE = 0x04
+BOOTLOADER_UPDATE_STATUS_SIZE_ERROR = 0x05
+BOOTLOADER_UPDATE_STATUS_ADDRESS_RANGE_ERROR = 0x06
+BOOTLOADER_UPDATE_STATUS_FLASH_UNLOCK_FAIL = 0x07
+BOOTLOADER_UPDATE_STATUS_ERASE_FAIL = 0x08
+BOOTLOADER_UPDATE_STATUS_PROGRAM_FAIL = 0x09
+BOOTLOADER_UPDATE_STATUS_VERIFY_FAIL = 0x0A
+BOOTLOADER_UPDATE_STATUS_BAD_SEQUENCE = 0x0B
+BOOTLOADER_UPDATE_STATUS_CRC_MISMATCH = 0x0C
+BOOTLOADER_UPDATE_STATUS_APP_INVALID = 0x0D
+BOOTLOADER_UPDATE_STATUS_METADATA_FAIL = 0x0E
+
+BOOTLOADER_UPDATE_STATE_IDLE = 0
+BOOTLOADER_UPDATE_STATE_STARTED = 1
+BOOTLOADER_UPDATE_STATE_ERASED = 2
+BOOTLOADER_UPDATE_STATE_WRITING = 3
+BOOTLOADER_UPDATE_STATE_WRITE_COMPLETE = 4
+BOOTLOADER_UPDATE_STATE_CRC_OK = 5
+BOOTLOADER_UPDATE_STATE_FINISHED = 6
+BOOTLOADER_UPDATE_STATE_ERROR = 7
+
+BOOTLOADER_UPDATE_STATUS_TEXT: dict[int, str] = {
+    BOOTLOADER_UPDATE_STATUS_OK: "OK",
+    BOOTLOADER_UPDATE_STATUS_UNKNOWN_COMMAND: "UNKNOWN_COMMAND",
+    BOOTLOADER_UPDATE_STATUS_BAD_DLC: "BAD_DLC",
+    BOOTLOADER_UPDATE_STATUS_BAD_MAGIC: "BAD_MAGIC",
+    BOOTLOADER_UPDATE_STATUS_BAD_STATE: "BAD_STATE",
+    BOOTLOADER_UPDATE_STATUS_SIZE_ERROR: "SIZE_ERROR",
+    BOOTLOADER_UPDATE_STATUS_ADDRESS_RANGE_ERROR: "ADDRESS_RANGE_ERROR",
+    BOOTLOADER_UPDATE_STATUS_FLASH_UNLOCK_FAIL: "FLASH_UNLOCK_FAIL",
+    BOOTLOADER_UPDATE_STATUS_ERASE_FAIL: "ERASE_FAIL",
+    BOOTLOADER_UPDATE_STATUS_PROGRAM_FAIL: "PROGRAM_FAIL",
+    BOOTLOADER_UPDATE_STATUS_VERIFY_FAIL: "VERIFY_FAIL",
+    BOOTLOADER_UPDATE_STATUS_BAD_SEQUENCE: "BAD_SEQUENCE",
+    BOOTLOADER_UPDATE_STATUS_CRC_MISMATCH: "CRC_MISMATCH",
+    BOOTLOADER_UPDATE_STATUS_APP_INVALID: "APP_INVALID",
+    BOOTLOADER_UPDATE_STATUS_METADATA_FAIL: "METADATA_FAIL",
+}
+
+BOOTLOADER_UPDATE_STATE_TEXT: dict[int, str] = {
+    BOOTLOADER_UPDATE_STATE_IDLE: "IDLE",
+    BOOTLOADER_UPDATE_STATE_STARTED: "STARTED",
+    BOOTLOADER_UPDATE_STATE_ERASED: "ERASED",
+    BOOTLOADER_UPDATE_STATE_WRITING: "WRITING",
+    BOOTLOADER_UPDATE_STATE_WRITE_COMPLETE: "WRITE_COMPLETE",
+    BOOTLOADER_UPDATE_STATE_CRC_OK: "CRC_OK",
+    BOOTLOADER_UPDATE_STATE_FINISHED: "FINISHED",
+    BOOTLOADER_UPDATE_STATE_ERROR: "ERROR",
 }
 
 BOOTLOADER_FLASH_STATUS_OK = 0x00
@@ -340,6 +422,115 @@ def build_bootloader_run_flash_self_test_frame(node_id: int) -> CanFrame:
     )
 
 
+def build_bootloader_start_update_frame(node_id: int, app_size: int, flags: int = 0) -> CanFrame:
+    if not 0 <= app_size <= 0xFFFFFFFF:
+        raise ValueError(f"App size must fit uint32: {app_size}")
+    data = bytes(
+        [
+            BOOTLOADER_CMD_START_UPDATE,
+            BOOTLOADER_ENTER_MAGIC_1,
+            BOOTLOADER_ENTER_MAGIC_2,
+            *app_size.to_bytes(4, "little"),
+            _validate_u8(flags, "Flags"),
+        ]
+    )
+    return CanFrame(
+        can_id=bootloader_request_id(node_id),
+        data=data,
+        dlc=8,
+        extended=False,
+        rtr=False,
+        timestamp=time.time(),
+    )
+
+
+def build_bootloader_erase_app_frame(node_id: int) -> CanFrame:
+    data = bytes([BOOTLOADER_CMD_ERASE_APP, BOOTLOADER_ENTER_MAGIC_1, BOOTLOADER_ENTER_MAGIC_2, 0, 0, 0, 0, 0])
+    return CanFrame(
+        can_id=bootloader_request_id(node_id),
+        data=data,
+        dlc=8,
+        extended=False,
+        rtr=False,
+        timestamp=time.time(),
+    )
+
+
+def build_bootloader_write_chunk_frame(node_id: int, sequence: int, payload: bytes) -> CanFrame:
+    if not 0 <= sequence <= 0xFFFF:
+        raise ValueError(f"Sequence must fit uint16: {sequence}")
+    if not 1 <= len(payload) <= BOOTLOADER_WRITE_CHUNK_PAYLOAD_SIZE:
+        raise ValueError("WRITE_CHUNK payload length must be 1..4 bytes.")
+
+    padded_payload = bytes(payload).ljust(BOOTLOADER_WRITE_CHUNK_PAYLOAD_SIZE, b"\xFF")
+    data = bytes(
+        [
+            BOOTLOADER_CMD_WRITE_CHUNK,
+            *sequence.to_bytes(2, "little"),
+            len(payload),
+            *padded_payload,
+        ]
+    )
+    return CanFrame(
+        can_id=bootloader_request_id(node_id),
+        data=data,
+        dlc=8,
+        extended=False,
+        rtr=False,
+        timestamp=time.time(),
+    )
+
+
+def build_bootloader_verify_crc_frame(node_id: int, crc32_value: int) -> CanFrame:
+    if not 0 <= crc32_value <= 0xFFFFFFFF:
+        raise ValueError(f"CRC32 must fit uint32: {crc32_value}")
+    data = bytes([BOOTLOADER_CMD_VERIFY_CRC, *crc32_value.to_bytes(4, "little"), 0, 0, 0])
+    return CanFrame(
+        can_id=bootloader_request_id(node_id),
+        data=data,
+        dlc=8,
+        extended=False,
+        rtr=False,
+        timestamp=time.time(),
+    )
+
+
+def build_bootloader_finish_update_frame(node_id: int) -> CanFrame:
+    data = bytes([BOOTLOADER_CMD_FINISH_UPDATE, BOOTLOADER_ENTER_MAGIC_1, BOOTLOADER_ENTER_MAGIC_2, 0, 0, 0, 0, 0])
+    return CanFrame(
+        can_id=bootloader_request_id(node_id),
+        data=data,
+        dlc=8,
+        extended=False,
+        rtr=False,
+        timestamp=time.time(),
+    )
+
+
+def build_bootloader_abort_update_frame(node_id: int) -> CanFrame:
+    data = bytes([BOOTLOADER_CMD_ABORT_UPDATE, BOOTLOADER_ENTER_MAGIC_1, BOOTLOADER_ENTER_MAGIC_2, 0, 0, 0, 0, 0])
+    return CanFrame(
+        can_id=bootloader_request_id(node_id),
+        data=data,
+        dlc=8,
+        extended=False,
+        rtr=False,
+        timestamp=time.time(),
+    )
+
+
+def build_bootloader_reset_to_app_frame(node_id: int) -> CanFrame:
+    data = bytes([BOOTLOADER_CMD_RESET_TO_APP, BOOTLOADER_ENTER_MAGIC_1, BOOTLOADER_ENTER_MAGIC_2, 0, 0, 0, 0, 0])
+    return CanFrame(
+        can_id=bootloader_request_id(node_id),
+        data=data,
+        dlc=8,
+        extended=False,
+        rtr=False,
+        timestamp=time.time(),
+    )
+
+
 def decode_status_frame(frame: CanFrame, node_id: int) -> BoardStatus | None:
     if frame.can_id != status_id(node_id):
         return None
@@ -494,6 +685,105 @@ def decode_bootloader_flash_self_test_frame(frame: CanFrame, node_id: int) -> Bo
     )
 
 
+def decode_bootloader_start_update_frame(frame: CanFrame, node_id: int) -> BootloaderStartUpdateResponse | None:
+    if frame.can_id != bootloader_response_id(node_id):
+        return None
+    if frame.dlc < 8 or len(frame.data) < 8:
+        return None
+
+    data = frame.data
+    if data[0] != BOOTLOADER_RESP_START_UPDATE:
+        return None
+
+    return BootloaderStartUpdateResponse(
+        response_type=data[0],
+        status=data[1],
+        status_text=bootloader_update_status_to_text(data[1]),
+        stage=data[2],
+        stage_text=bootloader_update_state_to_text(data[2]),
+        app_size=int.from_bytes(data[3:7], "little"),
+    )
+
+
+def decode_bootloader_erase_app_frame(frame: CanFrame, node_id: int) -> BootloaderEraseAppResponse | None:
+    if frame.can_id != bootloader_response_id(node_id):
+        return None
+    if frame.dlc < 8 or len(frame.data) < 8:
+        return None
+
+    data = frame.data
+    if data[0] != BOOTLOADER_RESP_ERASE_APP:
+        return None
+
+    return BootloaderEraseAppResponse(
+        response_type=data[0],
+        status=data[1],
+        status_text=bootloader_update_status_to_text(data[1]),
+        stage=data[2],
+        stage_text=bootloader_update_state_to_text(data[2]),
+        erased_pages=int.from_bytes(data[3:5], "little"),
+    )
+
+
+def decode_bootloader_write_chunk_frame(frame: CanFrame, node_id: int) -> BootloaderWriteChunkResponse | None:
+    if frame.can_id != bootloader_response_id(node_id):
+        return None
+    if frame.dlc < 8 or len(frame.data) < 8:
+        return None
+
+    data = frame.data
+    if data[0] != BOOTLOADER_RESP_WRITE_CHUNK:
+        return None
+
+    return BootloaderWriteChunkResponse(
+        response_type=data[0],
+        status=data[1],
+        status_text=bootloader_update_status_to_text(data[1]),
+        sequence=int.from_bytes(data[2:4], "little"),
+        next_sequence=int.from_bytes(data[4:6], "little"),
+        detail=bytes(data[6:8]),
+    )
+
+
+def decode_bootloader_verify_crc_frame(frame: CanFrame, node_id: int) -> BootloaderVerifyCrcResponse | None:
+    if frame.can_id != bootloader_response_id(node_id):
+        return None
+    if frame.dlc < 8 or len(frame.data) < 8:
+        return None
+
+    data = frame.data
+    if data[0] != BOOTLOADER_RESP_VERIFY_CRC:
+        return None
+
+    return BootloaderVerifyCrcResponse(
+        response_type=data[0],
+        status=data[1],
+        status_text=bootloader_update_status_to_text(data[1]),
+        actual_crc=int.from_bytes(data[2:6], "little"),
+    )
+
+
+def decode_bootloader_simple_update_frame(frame: CanFrame, node_id: int) -> BootloaderSimpleUpdateResponse | None:
+    if frame.can_id != bootloader_response_id(node_id):
+        return None
+    if frame.dlc < 8 or len(frame.data) < 8:
+        return None
+
+    data = frame.data
+    if data[0] not in {
+        BOOTLOADER_RESP_FINISH_UPDATE,
+        BOOTLOADER_RESP_ABORT_UPDATE,
+        BOOTLOADER_RESP_RESET_TO_APP,
+    }:
+        return None
+
+    return BootloaderSimpleUpdateResponse(
+        response_type=data[0],
+        status=data[1],
+        status_text=bootloader_update_status_to_text(data[1]),
+    )
+
+
 def diag_status_to_text(status: int) -> str:
     return DIAG_STATUS_TEXT.get(status, f"UNKNOWN_STATUS_0x{status:02X}")
 
@@ -508,6 +798,65 @@ def bootloader_flash_status_to_text(status: int) -> str:
 
 def bootloader_flash_stage_to_text(stage: int) -> str:
     return BOOTLOADER_FLASH_STAGE_TEXT.get(stage, f"UNKNOWN_STAGE_0x{stage:02X}")
+
+
+def bootloader_update_status_to_text(status: int) -> str:
+    return BOOTLOADER_UPDATE_STATUS_TEXT.get(status, f"UNKNOWN_STATUS_0x{status:02X}")
+
+
+def bootloader_update_state_to_text(state: int) -> str:
+    return BOOTLOADER_UPDATE_STATE_TEXT.get(state, f"UNKNOWN_STATE_0x{state:02X}")
+
+
+def bootloader_update_response_name(response_type: int) -> str:
+    names = {
+        BOOTLOADER_RESP_START_UPDATE: "START_UPDATE",
+        BOOTLOADER_RESP_ERASE_APP: "ERASE_APP",
+        BOOTLOADER_RESP_WRITE_CHUNK: "WRITE_CHUNK",
+        BOOTLOADER_RESP_VERIFY_CRC: "VERIFY_CRC",
+        BOOTLOADER_RESP_FINISH_UPDATE: "FINISH_UPDATE",
+        BOOTLOADER_RESP_ABORT_UPDATE: "ABORT_UPDATE",
+        BOOTLOADER_RESP_RESET_TO_APP: "RESET_TO_APP",
+    }
+    return names.get(response_type, f"0x{response_type:02X}")
+
+
+def crc32_ieee(data: bytes) -> int:
+    return binascii.crc32(data) & 0xFFFFFFFF
+
+
+def validate_app_bin_data(data: bytes, path: str = "") -> AppBinInfo:
+    size = len(data)
+    crc = crc32_ieee(data)
+    chunk_count = (size + BOOTLOADER_WRITE_CHUNK_PAYLOAD_SIZE - 1) // BOOTLOADER_WRITE_CHUNK_PAYLOAD_SIZE
+    initial_sp = int.from_bytes(data[0:4], "little") if size >= 4 else 0
+    reset_handler = int.from_bytes(data[4:8], "little") if size >= 8 else 0
+    reset_address = reset_handler & ~1
+    error = ""
+
+    if size <= 8:
+        error = "File size must be > 8 bytes."
+    elif size > APP_MAX_SIZE_BYTES:
+        error = f"File size exceeds app region limit ({APP_MAX_SIZE_BYTES} bytes)."
+    elif not SRAM_START_ADDR <= initial_sp <= SRAM_END_ADDR:
+        error = f"Initial SP 0x{initial_sp:08X} is outside SRAM."
+    elif initial_sp & 0x3:
+        error = f"Initial SP 0x{initial_sp:08X} is not 4-byte aligned."
+    elif (reset_handler & 1) == 0:
+        error = f"Reset handler 0x{reset_handler:08X} does not have Thumb bit set."
+    elif not APP_BASE_ADDR <= reset_address <= APP_END_ADDR:
+        error = f"Reset handler 0x{reset_address:08X} is outside app Flash."
+
+    return AppBinInfo(
+        path=path,
+        size=size,
+        crc32=crc,
+        chunk_count=chunk_count,
+        initial_sp=initial_sp,
+        reset_handler=reset_handler,
+        valid=error == "",
+        error=error,
+    )
 
 
 def counter_id_to_name(counter_id: int) -> str:
