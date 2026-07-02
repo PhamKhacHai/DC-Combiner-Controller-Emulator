@@ -64,3 +64,15 @@ class DiagnosticErrorResponse:
     group_index: int
     status: int
     status_text: str
+
+
+@dataclass(slots=True)
+class BootloaderInfoResponse:
+    response_type: int
+    status: int
+    status_text: str
+    bl_major: int
+    bl_minor: int
+    app_valid: bool
+    boot_mode: int
+    boot_mode_text: str

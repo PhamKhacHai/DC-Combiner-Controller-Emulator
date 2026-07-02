@@ -31,6 +31,7 @@ from can_driver import MockCanDriver
 from controller import ControllerSimulator
 from models import (
     BoardStatus,
+    BootloaderInfoResponse,
     CanFrame,
     DiagnosticCounterResponse,
     DiagnosticErrorResponse,
@@ -38,6 +39,7 @@ from models import (
 )
 from protocol import (
     BOOTLOADER_REQUEST_ID_BASE,
+    BOOTLOADER_RESPONSE_ID_BASE,
     CAN_BITRATE,
     DIAG_GROUP_GLOBAL,
     DIAG_REQUEST_ID_BASE,
@@ -48,6 +50,7 @@ from protocol import (
     GROUP_DIAG_COUNTERS,
     NODE_ID_MAX,
     counter_id_to_name,
+    decode_bootloader_info_frame,
     decode_diag_response_frame,
     format_can_id,
     format_hex_data,
@@ -223,7 +226,10 @@ class MainWindow(QMainWindow):
 
         self.bootloader_button = QPushButton("Enter Bootloader")
         self.bootloader_button.clicked.connect(lambda: self.enter_bootloader())
+        self.boot_info_button = QPushButton("Get Boot Info")
+        self.boot_info_button.clicked.connect(self.get_boot_info)
         layout.addWidget(self.bootloader_button)
+        layout.addWidget(self.boot_info_button)
         layout.addStretch(1)
         return box
 
@@ -466,6 +472,8 @@ class MainWindow(QMainWindow):
         )
         self.controller.last_diag_response = None
         self.controller.diag_response_history.clear()
+        self.controller.last_boot_info_response = None
+        self.controller.boot_info_response_history.clear()
         self.seen_diag_response_count = 0
         self.reset_request_tracking()
         self.update_connected_state()
@@ -484,6 +492,7 @@ class MainWindow(QMainWindow):
         self.connect_button.setEnabled(not connected)
         self.disconnect_button.setEnabled(connected)
         self.bootloader_button.setEnabled(connected)
+        self.boot_info_button.setEnabled(connected)
         for widget in self.diag_connected_widgets:
             widget.setEnabled(connected)
         if not connected and self.diag_auto_check.isChecked():
@@ -586,6 +595,21 @@ class MainWindow(QMainWindow):
             return None
 
         self.log_frame("TX", frame)
+        return frame
+
+    def get_boot_info(self) -> CanFrame | None:
+        if not self.ensure_connected():
+            return None
+
+        try:
+            frame = self.controller.send_get_boot_info()
+        except Exception as exc:
+            QMessageBox.warning(self, "Get boot info failed", str(exc))
+            self.log_message(f"ERROR {exc}")
+            return None
+
+        self.log_frame("TX", frame)
+        self.poll_rx()
         return frame
 
     def clear_log(self) -> None:
@@ -927,7 +951,11 @@ class MainWindow(QMainWindow):
     def log_frame(self, direction: str, frame: CanFrame) -> None:
         boot_label = " BOOT" if self.is_bootloader_frame(frame.can_id) else ""
         diag_label = " DIAG" if not boot_label and self.is_diagnostic_frame(frame.can_id) else ""
-        suffix = self.format_diagnostic_log_suffix(direction, frame) if diag_label else ""
+        suffix = ""
+        if boot_label:
+            suffix = self.format_bootloader_log_suffix(direction, frame)
+        elif diag_label:
+            suffix = self.format_diagnostic_log_suffix(direction, frame)
         self.log_message(
             f"{direction}{boot_label}{diag_label} ID={format_can_id(frame.can_id)} DLC={frame.dlc} "
             f"DATA={format_hex_data(frame.data)}{suffix}"
@@ -936,7 +964,9 @@ class MainWindow(QMainWindow):
     def is_bootloader_frame(self, can_id: int) -> bool:
         request_min = BOOTLOADER_REQUEST_ID_BASE
         request_max = BOOTLOADER_REQUEST_ID_BASE + NODE_ID_MAX
-        return request_min <= can_id <= request_max
+        response_min = BOOTLOADER_RESPONSE_ID_BASE
+        response_max = BOOTLOADER_RESPONSE_ID_BASE + NODE_ID_MAX
+        return request_min <= can_id <= request_max or response_min <= can_id <= response_max
 
     def is_diagnostic_frame(self, can_id: int) -> bool:
         request_min = DIAG_REQUEST_ID_BASE
@@ -944,6 +974,21 @@ class MainWindow(QMainWindow):
         response_min = DIAG_RESPONSE_ID_BASE
         response_max = DIAG_RESPONSE_ID_BASE + NODE_ID_MAX
         return request_min <= can_id <= request_max or response_min <= can_id <= response_max
+
+    def format_bootloader_log_suffix(self, direction: str, frame: CanFrame) -> str:
+        if direction != "RX":
+            return ""
+
+        response = decode_bootloader_info_frame(frame, self.controller.node_id)
+        if isinstance(response, BootloaderInfoResponse):
+            suffix = (
+                f" BL={response.bl_major}.{response.bl_minor} "
+                f"APP_VALID={1 if response.app_valid else 0} MODE={response.boot_mode_text}"
+            )
+            if response.status_text != "OK":
+                suffix += f" STATUS={response.status_text}"
+            return suffix
+        return ""
 
     def format_diagnostic_log_suffix(self, direction: str, frame: CanFrame) -> str:
         if direction != "RX":

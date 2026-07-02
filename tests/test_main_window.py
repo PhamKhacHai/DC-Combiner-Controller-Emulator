@@ -382,6 +382,32 @@ def test_enter_bootloader_stops_periodic_and_sends_current_node_frame() -> None:
         app.processEvents()
 
 
+def test_get_boot_info_sends_request_and_logs_response() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+
+    try:
+        window.connect_can()
+        window.poll_rx()
+        window.node_spin.setValue(4)
+
+        frame = window.get_boot_info()
+
+        assert frame is not None
+        assert frame.can_id == 0x554
+        assert frame.data == bytes([0x11, 0, 0, 0, 0, 0, 0, 0])
+        assert window.controller.last_boot_info_response is not None
+        assert "TX BOOT ID=0x554 DLC=8 DATA=11 00 00 00 00 00 00 00" in window.log_text.toPlainText()
+        assert (
+            "RX BOOT ID=0x564 DLC=8 DATA=91 00 01 00 01 01 00 00 "
+            "BL=1.0 APP_VALID=1 MODE=BOOTLOADER"
+        ) in window.log_text.toPlainText()
+    finally:
+        window.rx_timer.stop()
+        window.close()
+        app.processEvents()
+
+
 def test_disconnect_clears_start_button_active_state() -> None:
     app = QApplication.instance() or QApplication([])
     window = MainWindow()
@@ -446,6 +472,7 @@ def test_one_shot_buttons_do_not_get_toggle_active_state() -> None:
             window.off_button,
             window.clear_fault_button,
             window.bootloader_button,
+            window.boot_info_button,
             window.clear_log_button,
             window.diag_read_selected_button,
             window.diag_read_all_button,

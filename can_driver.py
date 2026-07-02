@@ -7,6 +7,10 @@ from typing import Deque
 
 from models import CanFrame
 from protocol import (
+    BOOTLOADER_CMD_GET_BOOT_INFO,
+    BOOTLOADER_REQUEST_ID_BASE,
+    BOOTLOADER_RESP_GET_BOOT_INFO,
+    BOOTLOADER_STATUS_OK,
     DIAG_CMD_READ_COUNTER,
     DIAG_CMD_RESET_ALL_COUNTERS,
     DIAG_COUNTER_CAN_COMMAND_RX,
@@ -38,6 +42,7 @@ from protocol import (
     heartbeat_id,
     is_global_counter,
     is_group_counter,
+    bootloader_response_id,
     status_id,
 )
 
@@ -131,6 +136,10 @@ class MockCanDriver(CanDriver):
             self._handle_diag_request_frame(can_id, data)
             return
 
+        if BOOTLOADER_REQUEST_ID_BASE <= can_id <= BOOTLOADER_REQUEST_ID_BASE + 7:
+            self._handle_bootloader_request_frame(can_id, data)
+            return
+
     def read_frame(self, timeout_ms: int = 0) -> CanFrame | None:
         if not self._is_open:
             return None
@@ -222,6 +231,13 @@ class MockCanDriver(CanDriver):
         self._increment_global(DIAG_COUNTER_DIAG_ERROR)
         self._enqueue_diag_error(command, counter_id, group_index, DIAG_STATUS_INVALID_COMMAND)
 
+    def _handle_bootloader_request_frame(self, can_id: int, data: bytes) -> None:
+        self._node_id = can_id - BOOTLOADER_REQUEST_ID_BASE
+        command = data[0] if len(data) > 0 else 0
+
+        if len(data) == 8 and command == BOOTLOADER_CMD_GET_BOOT_INFO:
+            self._enqueue_boot_info_response()
+
     def _enqueue_diag_counter_response(
         self,
         counter_id: int,
@@ -243,6 +259,10 @@ class MockCanDriver(CanDriver):
     def _enqueue_diag_error(self, command: int, counter_id: int, group_index: int, status: int) -> None:
         data = bytes([DIAG_RESP_ERROR, counter_id, group_index, command, 0x00, 0x00, 0x00, status])
         self._enqueue_rx_frame(diag_response_id(self._node_id), data)
+
+    def _enqueue_boot_info_response(self) -> None:
+        data = bytes([BOOTLOADER_RESP_GET_BOOT_INFO, BOOTLOADER_STATUS_OK, 1, 0, 1, 1, 0, 0])
+        self._enqueue_rx_frame(bootloader_response_id(self._node_id), data)
 
     def _get_counter(self, counter_id: int, group_index: int) -> tuple[int, int]:
         if is_group_counter(counter_id):

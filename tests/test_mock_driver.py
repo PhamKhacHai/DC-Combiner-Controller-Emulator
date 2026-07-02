@@ -110,3 +110,24 @@ def test_controller_sends_enter_bootloader_frame_without_mock_response() -> None
     assert tx_frame.data == bytes([0x10, 0xA5, 0x5A, 0, 0, 0, 0, 0])
     assert driver.tx_frames[-1].can_id == 0x553
     assert rx_frames == []
+
+
+def test_controller_get_boot_info_receives_mock_response() -> None:
+    driver = MockCanDriver()
+    controller = ControllerSimulator(driver)
+    controller.connect("Mock CAN Device")
+    controller.poll_rx()
+    controller.set_node_id(3)
+
+    tx_frame = controller.send_get_boot_info()
+    rx_frames = controller.poll_rx()
+
+    assert tx_frame.can_id == 0x553
+    assert tx_frame.data == bytes([0x11, 0, 0, 0, 0, 0, 0, 0])
+    assert any(frame.can_id == 0x563 for frame in rx_frames)
+    assert controller.last_boot_info_response is not None
+    assert controller.last_boot_info_response.status_text == "OK"
+    assert controller.last_boot_info_response.bl_major == 1
+    assert controller.last_boot_info_response.bl_minor == 0
+    assert controller.last_boot_info_response.app_valid is True
+    assert controller.last_boot_info_response.boot_mode_text == "BOOTLOADER"

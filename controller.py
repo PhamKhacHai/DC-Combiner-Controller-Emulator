@@ -3,6 +3,7 @@ from __future__ import annotations
 from can_driver import CanDriver
 from models import (
     BoardStatus,
+    BootloaderInfoResponse,
     CanFrame,
     DiagnosticCounterResponse,
     DiagnosticErrorResponse,
@@ -13,10 +14,12 @@ from protocol import (
     CAN_BITRATE,
     COMMAND_CLEAR_FAULT_MASK,
     build_bootloader_enter_frame,
+    build_bootloader_get_info_frame,
     build_command_frame,
     build_command_mask,
     build_diag_read_counter_frame,
     build_diag_reset_all_frame,
+    decode_bootloader_info_frame,
     decode_diag_response_frame,
     decode_heartbeat_frame,
     decode_status_frame,
@@ -36,6 +39,8 @@ class ControllerSimulator:
         self.last_heartbeat: HeartbeatStatus | None = None
         self.last_diag_response: DiagnosticResponse | None = None
         self.diag_response_history: list[DiagnosticResponse] = []
+        self.last_boot_info_response: BootloaderInfoResponse | None = None
+        self.boot_info_response_history: list[BootloaderInfoResponse] = []
 
     def connect(self, device: str, channel: int = 0, bitrate: int = CAN_BITRATE) -> None:
         self.driver.open(device, channel, bitrate)
@@ -97,6 +102,14 @@ class ControllerSimulator:
         self.driver.send_frame(frame.can_id, frame.data, frame.extended, frame.rtr)
         return frame
 
+    def send_get_boot_info(self) -> CanFrame:
+        if not self.connected or not self.driver.is_open():
+            raise RuntimeError("CAN is not connected.")
+
+        frame = build_bootloader_get_info_frame(self.node_id)
+        self.driver.send_frame(frame.can_id, frame.data, frame.extended, frame.rtr)
+        return frame
+
     def poll_rx(self) -> list[CanFrame]:
         frames: list[CanFrame] = []
         for _ in range(32):
@@ -119,5 +132,11 @@ class ControllerSimulator:
             if diag_response is not None:
                 self.last_diag_response = diag_response
                 self.diag_response_history.append(diag_response)
+                continue
+
+            boot_info_response = decode_bootloader_info_frame(frame, self.node_id)
+            if boot_info_response is not None:
+                self.last_boot_info_response = boot_info_response
+                self.boot_info_response_history.append(boot_info_response)
 
         return frames

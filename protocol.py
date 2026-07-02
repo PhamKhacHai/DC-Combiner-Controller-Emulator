@@ -4,6 +4,7 @@ import time
 
 from models import (
     BoardStatus,
+    BootloaderInfoResponse,
     CanFrame,
     DiagnosticCounterResponse,
     DiagnosticErrorResponse,
@@ -24,6 +25,7 @@ HEARTBEAT_ID_BASE = 0x520
 DIAG_REQUEST_ID_BASE = 0x530
 DIAG_RESPONSE_ID_BASE = 0x540
 BOOTLOADER_REQUEST_ID_BASE = 0x550
+BOOTLOADER_RESPONSE_ID_BASE = 0x560
 
 COMMAND_CLEAR_FAULT_MASK = 0x01
 
@@ -51,8 +53,20 @@ DIAG_RESET_MAGIC_2 = 0x5A
 DIAG_GROUP_GLOBAL = 0xFF
 
 BOOTLOADER_CMD_ENTER = 0x10
+BOOTLOADER_CMD_GET_BOOT_INFO = 0x11
 BOOTLOADER_ENTER_MAGIC_1 = 0xA5
 BOOTLOADER_ENTER_MAGIC_2 = 0x5A
+BOOTLOADER_RESP_GET_BOOT_INFO = 0x91
+BOOTLOADER_STATUS_OK = 0x00
+BOOTLOADER_STATUS_UNKNOWN_COMMAND = 0x01
+BOOTLOADER_STATUS_BAD_DLC = 0x02
+BOOTLOADER_MODE_ACTIVE = 0x01
+
+BOOTLOADER_STATUS_TEXT: dict[int, str] = {
+    BOOTLOADER_STATUS_OK: "OK",
+    BOOTLOADER_STATUS_UNKNOWN_COMMAND: "UNKNOWN_COMMAND",
+    BOOTLOADER_STATUS_BAD_DLC: "BAD_DLC",
+}
 
 DIAG_COUNTER_CONTACTOR_CLOSE = 0x01
 DIAG_COUNTER_CONTACTOR_OPEN = 0x02
@@ -133,6 +147,10 @@ def bootloader_request_id(node_id: int) -> int:
     return BOOTLOADER_REQUEST_ID_BASE + validate_node_id(node_id)
 
 
+def bootloader_response_id(node_id: int) -> int:
+    return BOOTLOADER_RESPONSE_ID_BASE + validate_node_id(node_id)
+
+
 def group_to_bit(group_number: int) -> int:
     if not 1 <= group_number <= GROUP_COUNT:
         raise ValueError(f"Group number must be in 1..{GROUP_COUNT}: {group_number}")
@@ -210,6 +228,29 @@ def build_bootloader_enter_frame(node_id: int) -> CanFrame:
             BOOTLOADER_CMD_ENTER,
             BOOTLOADER_ENTER_MAGIC_1,
             BOOTLOADER_ENTER_MAGIC_2,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+        ]
+    )
+    return CanFrame(
+        can_id=bootloader_request_id(node_id),
+        data=data,
+        dlc=8,
+        extended=False,
+        rtr=False,
+        timestamp=time.time(),
+    )
+
+
+def build_bootloader_get_info_frame(node_id: int) -> CanFrame:
+    data = bytes(
+        [
+            BOOTLOADER_CMD_GET_BOOT_INFO,
+            0x00,
+            0x00,
             0x00,
             0x00,
             0x00,
@@ -316,8 +357,35 @@ def decode_diag_response_frame(
     return None
 
 
+def decode_bootloader_info_frame(frame: CanFrame, node_id: int) -> BootloaderInfoResponse | None:
+    if frame.can_id != bootloader_response_id(node_id):
+        return None
+    if frame.dlc < 8 or len(frame.data) < 8:
+        return None
+
+    data = frame.data
+    if data[0] != BOOTLOADER_RESP_GET_BOOT_INFO:
+        return None
+
+    boot_mode = data[5]
+    return BootloaderInfoResponse(
+        response_type=data[0],
+        status=data[1],
+        status_text=bootloader_status_to_text(data[1]),
+        bl_major=data[2],
+        bl_minor=data[3],
+        app_valid=data[4] != 0,
+        boot_mode=boot_mode,
+        boot_mode_text="BOOTLOADER" if boot_mode == BOOTLOADER_MODE_ACTIVE else f"0x{boot_mode:02X}",
+    )
+
+
 def diag_status_to_text(status: int) -> str:
     return DIAG_STATUS_TEXT.get(status, f"UNKNOWN_STATUS_0x{status:02X}")
+
+
+def bootloader_status_to_text(status: int) -> str:
+    return BOOTLOADER_STATUS_TEXT.get(status, f"UNKNOWN_STATUS_0x{status:02X}")
 
 
 def counter_id_to_name(counter_id: int) -> str:

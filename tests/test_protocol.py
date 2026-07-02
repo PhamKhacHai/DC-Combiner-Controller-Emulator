@@ -7,12 +7,15 @@ from protocol import (
     DIAG_STATUS_OK,
     DIAG_STATUS_RESET_MAGIC_INVALID,
     bootloader_request_id,
+    bootloader_response_id,
     build_bootloader_enter_frame,
+    build_bootloader_get_info_frame,
     build_diag_read_counter_frame,
     build_diag_reset_all_frame,
     build_command_frame,
     build_command_mask,
     command_id,
+    decode_bootloader_info_frame,
     decode_diag_response_frame,
     decode_heartbeat_frame,
     decode_status_frame,
@@ -53,9 +56,11 @@ def test_can_ids() -> None:
     assert diag_request_id(0) == 0x530
     assert diag_response_id(0) == 0x540
     assert bootloader_request_id(0) == 0x550
+    assert bootloader_response_id(0) == 0x560
     assert diag_request_id(7) == 0x537
     assert diag_response_id(7) == 0x547
     assert bootloader_request_id(7) == 0x557
+    assert bootloader_response_id(7) == 0x567
 
 
 def test_invalid_values() -> None:
@@ -99,6 +104,26 @@ def test_bootloader_enter_frame() -> None:
     assert frame.dlc == 8
     assert frame.extended is False
     assert frame.rtr is False
+
+
+def test_bootloader_get_info_frame() -> None:
+    frame = build_bootloader_get_info_frame(2)
+    assert frame.can_id == 0x552
+    assert frame.data == bytes([0x11, 0, 0, 0, 0, 0, 0, 0])
+    assert frame.dlc == 8
+    assert frame.extended is False
+    assert frame.rtr is False
+
+
+def test_bootloader_info_response_decode() -> None:
+    frame = CanFrame(can_id=0x560, data=bytes([0x91, 0x00, 1, 0, 1, 1, 0, 0]), dlc=8)
+    response = decode_bootloader_info_frame(frame, 0)
+    assert response is not None
+    assert response.status_text == "OK"
+    assert response.bl_major == 1
+    assert response.bl_minor == 0
+    assert response.app_valid is True
+    assert response.boot_mode_text == "BOOTLOADER"
 
 
 def test_diag_counter_response_decode() -> None:
