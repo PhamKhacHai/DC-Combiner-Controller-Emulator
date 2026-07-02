@@ -408,6 +408,55 @@ def test_get_boot_info_sends_request_and_logs_response() -> None:
         app.processEvents()
 
 
+def test_get_flash_layout_sends_request_and_logs_response() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+
+    try:
+        window.connect_can()
+        window.poll_rx()
+        window.node_spin.setValue(4)
+
+        frame = window.get_flash_layout()
+
+        assert frame is not None
+        assert frame.can_id == 0x554
+        assert frame.data == bytes([0x12, 0, 0, 0, 0, 0, 0, 0])
+        assert window.controller.last_flash_layout_response is not None
+        assert "TX BOOT ID=0x554 DLC=8 DATA=12 00 00 00 00 00 00 00" in window.log_text.toPlainText()
+        assert (
+            "RX BOOT ID=0x564 DLC=8 DATA=92 00 01 10 2F 3F 00 00 "
+            "PAGE=1KB BOOT=16KB APP=47KB SCRATCH_PAGE=63"
+        ) in window.log_text.toPlainText()
+    finally:
+        window.rx_timer.stop()
+        window.close()
+        app.processEvents()
+
+
+def test_run_flash_self_test_sends_request_and_logs_response() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+
+    try:
+        window.connect_can()
+        window.poll_rx()
+        window.node_spin.setValue(4)
+
+        frame = window.run_flash_self_test(confirm=False)
+
+        assert frame is not None
+        assert frame.can_id == 0x554
+        assert frame.data == bytes([0x20, 0xA5, 0x5A, 0, 0, 0, 0, 0])
+        assert window.controller.last_flash_self_test_response is not None
+        assert "TX BOOT ID=0x554 DLC=8 DATA=20 A5 5A 00 00 00 00 00" in window.log_text.toPlainText()
+        assert "RX BOOT ID=0x564 DLC=8 DATA=A0 00 00 00 00 00 00 00 FLASH_TEST=OK" in window.log_text.toPlainText()
+    finally:
+        window.rx_timer.stop()
+        window.close()
+        app.processEvents()
+
+
 def test_disconnect_clears_start_button_active_state() -> None:
     app = QApplication.instance() or QApplication([])
     window = MainWindow()
@@ -473,6 +522,8 @@ def test_one_shot_buttons_do_not_get_toggle_active_state() -> None:
             window.clear_fault_button,
             window.bootloader_button,
             window.boot_info_button,
+            window.flash_layout_button,
+            window.flash_self_test_button,
             window.clear_log_button,
             window.diag_read_selected_button,
             window.diag_read_all_button,

@@ -31,6 +31,8 @@ from can_driver import MockCanDriver
 from controller import ControllerSimulator
 from models import (
     BoardStatus,
+    BootloaderFlashLayoutResponse,
+    BootloaderFlashSelfTestResponse,
     BootloaderInfoResponse,
     CanFrame,
     DiagnosticCounterResponse,
@@ -50,6 +52,8 @@ from protocol import (
     GROUP_DIAG_COUNTERS,
     NODE_ID_MAX,
     counter_id_to_name,
+    decode_bootloader_flash_layout_frame,
+    decode_bootloader_flash_self_test_frame,
     decode_bootloader_info_frame,
     decode_diag_response_frame,
     format_can_id,
@@ -228,8 +232,14 @@ class MainWindow(QMainWindow):
         self.bootloader_button.clicked.connect(lambda: self.enter_bootloader())
         self.boot_info_button = QPushButton("Get Boot Info")
         self.boot_info_button.clicked.connect(self.get_boot_info)
+        self.flash_layout_button = QPushButton("Get Flash Layout")
+        self.flash_layout_button.clicked.connect(self.get_flash_layout)
+        self.flash_self_test_button = QPushButton("Run Flash Self-Test")
+        self.flash_self_test_button.clicked.connect(lambda: self.run_flash_self_test())
         layout.addWidget(self.bootloader_button)
         layout.addWidget(self.boot_info_button)
+        layout.addWidget(self.flash_layout_button)
+        layout.addWidget(self.flash_self_test_button)
         layout.addStretch(1)
         return box
 
@@ -474,6 +484,10 @@ class MainWindow(QMainWindow):
         self.controller.diag_response_history.clear()
         self.controller.last_boot_info_response = None
         self.controller.boot_info_response_history.clear()
+        self.controller.last_flash_layout_response = None
+        self.controller.flash_layout_response_history.clear()
+        self.controller.last_flash_self_test_response = None
+        self.controller.flash_self_test_response_history.clear()
         self.seen_diag_response_count = 0
         self.reset_request_tracking()
         self.update_connected_state()
@@ -493,6 +507,8 @@ class MainWindow(QMainWindow):
         self.disconnect_button.setEnabled(connected)
         self.bootloader_button.setEnabled(connected)
         self.boot_info_button.setEnabled(connected)
+        self.flash_layout_button.setEnabled(connected)
+        self.flash_self_test_button.setEnabled(connected)
         for widget in self.diag_connected_widgets:
             widget.setEnabled(connected)
         if not connected and self.diag_auto_check.isChecked():
@@ -605,6 +621,49 @@ class MainWindow(QMainWindow):
             frame = self.controller.send_get_boot_info()
         except Exception as exc:
             QMessageBox.warning(self, "Get boot info failed", str(exc))
+            self.log_message(f"ERROR {exc}")
+            return None
+
+        self.log_frame("TX", frame)
+        self.poll_rx()
+        return frame
+
+    def get_flash_layout(self) -> CanFrame | None:
+        if not self.ensure_connected():
+            return None
+
+        try:
+            frame = self.controller.send_get_flash_layout()
+        except Exception as exc:
+            QMessageBox.warning(self, "Get flash layout failed", str(exc))
+            self.log_message(f"ERROR {exc}")
+            return None
+
+        self.log_frame("TX", frame)
+        self.poll_rx()
+        return frame
+
+    def run_flash_self_test(self, confirm: bool = True) -> CanFrame | None:
+        if not self.ensure_connected():
+            return None
+
+        if confirm:
+            answer = QMessageBox.question(
+                self,
+                "Run flash self-test",
+                "Run flash self-test?\n"
+                "This will erase/write only the reserved scratch page 0x0800FC00.\n"
+                "Application and bootloader regions must not be modified.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return None
+
+        try:
+            frame = self.controller.send_run_flash_self_test()
+        except Exception as exc:
+            QMessageBox.warning(self, "Run flash self-test failed", str(exc))
             self.log_message(f"ERROR {exc}")
             return None
 
@@ -988,6 +1047,22 @@ class MainWindow(QMainWindow):
             if response.status_text != "OK":
                 suffix += f" STATUS={response.status_text}"
             return suffix
+
+        flash_layout = decode_bootloader_flash_layout_frame(frame, self.controller.node_id)
+        if isinstance(flash_layout, BootloaderFlashLayoutResponse):
+            return (
+                f" PAGE={flash_layout.page_kb}KB BOOT={flash_layout.boot_kb}KB "
+                f"APP={flash_layout.app_kb}KB SCRATCH_PAGE={flash_layout.scratch_page_index}"
+            )
+
+        flash_self_test = decode_bootloader_flash_self_test_frame(frame, self.controller.node_id)
+        if isinstance(flash_self_test, BootloaderFlashSelfTestResponse):
+            if flash_self_test.status_text == "OK":
+                return " FLASH_TEST=OK"
+            return (
+                f" FLASH_TEST=FAIL STATUS={flash_self_test.status_text} "
+                f"STAGE={flash_self_test.stage_text} DETAIL={format_hex_data(flash_self_test.detail)}"
+            )
         return ""
 
     def format_diagnostic_log_suffix(self, direction: str, frame: CanFrame) -> str:

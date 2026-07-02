@@ -7,7 +7,15 @@ from typing import Deque
 
 from models import CanFrame
 from protocol import (
+    BOOTLOADER_CMD_GET_FLASH_LAYOUT,
     BOOTLOADER_CMD_GET_BOOT_INFO,
+    BOOTLOADER_CMD_RUN_FLASH_SELF_TEST,
+    BOOTLOADER_ENTER_MAGIC_1,
+    BOOTLOADER_ENTER_MAGIC_2,
+    BOOTLOADER_FLASH_STATUS_BAD_MAGIC,
+    BOOTLOADER_FLASH_STATUS_OK,
+    BOOTLOADER_RESP_FLASH_SELF_TEST,
+    BOOTLOADER_RESP_GET_FLASH_LAYOUT,
     BOOTLOADER_REQUEST_ID_BASE,
     BOOTLOADER_RESP_GET_BOOT_INFO,
     BOOTLOADER_STATUS_OK,
@@ -237,6 +245,17 @@ class MockCanDriver(CanDriver):
 
         if len(data) == 8 and command == BOOTLOADER_CMD_GET_BOOT_INFO:
             self._enqueue_boot_info_response()
+            return
+
+        if len(data) == 8 and command == BOOTLOADER_CMD_GET_FLASH_LAYOUT:
+            self._enqueue_flash_layout_response()
+            return
+
+        if len(data) == 8 and command == BOOTLOADER_CMD_RUN_FLASH_SELF_TEST:
+            if data[1] == BOOTLOADER_ENTER_MAGIC_1 and data[2] == BOOTLOADER_ENTER_MAGIC_2:
+                self._enqueue_flash_self_test_response(BOOTLOADER_FLASH_STATUS_OK, 0)
+            else:
+                self._enqueue_flash_self_test_response(BOOTLOADER_FLASH_STATUS_BAD_MAGIC, 0)
 
     def _enqueue_diag_counter_response(
         self,
@@ -262,6 +281,14 @@ class MockCanDriver(CanDriver):
 
     def _enqueue_boot_info_response(self) -> None:
         data = bytes([BOOTLOADER_RESP_GET_BOOT_INFO, BOOTLOADER_STATUS_OK, 1, 0, 1, 1, 0, 0])
+        self._enqueue_rx_frame(bootloader_response_id(self._node_id), data)
+
+    def _enqueue_flash_layout_response(self) -> None:
+        data = bytes([BOOTLOADER_RESP_GET_FLASH_LAYOUT, BOOTLOADER_STATUS_OK, 1, 16, 47, 63, 0, 0])
+        self._enqueue_rx_frame(bootloader_response_id(self._node_id), data)
+
+    def _enqueue_flash_self_test_response(self, status: int, stage: int) -> None:
+        data = bytes([BOOTLOADER_RESP_FLASH_SELF_TEST, status, stage, 0, 0, 0, 0, 0])
         self._enqueue_rx_frame(bootloader_response_id(self._node_id), data)
 
     def _get_counter(self, counter_id: int, group_index: int) -> tuple[int, int]:

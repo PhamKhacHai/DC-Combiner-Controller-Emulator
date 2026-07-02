@@ -131,3 +131,42 @@ def test_controller_get_boot_info_receives_mock_response() -> None:
     assert controller.last_boot_info_response.bl_minor == 0
     assert controller.last_boot_info_response.app_valid is True
     assert controller.last_boot_info_response.boot_mode_text == "BOOTLOADER"
+
+
+def test_controller_get_flash_layout_receives_mock_response() -> None:
+    driver = MockCanDriver()
+    controller = ControllerSimulator(driver)
+    controller.connect("Mock CAN Device")
+    controller.poll_rx()
+    controller.set_node_id(3)
+
+    tx_frame = controller.send_get_flash_layout()
+    rx_frames = controller.poll_rx()
+
+    assert tx_frame.can_id == 0x553
+    assert tx_frame.data == bytes([0x12, 0, 0, 0, 0, 0, 0, 0])
+    assert any(frame.can_id == 0x563 for frame in rx_frames)
+    assert controller.last_flash_layout_response is not None
+    assert controller.last_flash_layout_response.status_text == "OK"
+    assert controller.last_flash_layout_response.page_kb == 1
+    assert controller.last_flash_layout_response.boot_kb == 16
+    assert controller.last_flash_layout_response.app_kb == 47
+    assert controller.last_flash_layout_response.scratch_page_index == 63
+
+
+def test_controller_run_flash_self_test_receives_mock_response() -> None:
+    driver = MockCanDriver()
+    controller = ControllerSimulator(driver)
+    controller.connect("Mock CAN Device")
+    controller.poll_rx()
+    controller.set_node_id(3)
+
+    tx_frame = controller.send_run_flash_self_test()
+    rx_frames = controller.poll_rx()
+
+    assert tx_frame.can_id == 0x553
+    assert tx_frame.data == bytes([0x20, 0xA5, 0x5A, 0, 0, 0, 0, 0])
+    assert any(frame.can_id == 0x563 for frame in rx_frames)
+    assert controller.last_flash_self_test_response is not None
+    assert controller.last_flash_self_test_response.status_text == "OK"
+    assert controller.last_flash_self_test_response.stage_text == "DONE"

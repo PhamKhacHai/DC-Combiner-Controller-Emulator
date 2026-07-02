@@ -76,3 +76,25 @@ class BootloaderInfoResponse:
     app_valid: bool
     boot_mode: int
     boot_mode_text: str
+
+
+@dataclass(slots=True)
+class BootloaderFlashLayoutResponse:
+    response_type: int
+    status: int
+    status_text: str
+    page_kb: int
+    boot_kb: int
+    app_kb: int
+    scratch_page_index: int
+    flags: int
+
+
+@dataclass(slots=True)
+class BootloaderFlashSelfTestResponse:
+    response_type: int
+    status: int
+    status_text: str
+    stage: int
+    stage_text: str
+    detail: bytes

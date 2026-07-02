@@ -9,12 +9,16 @@ from protocol import (
     bootloader_request_id,
     bootloader_response_id,
     build_bootloader_enter_frame,
+    build_bootloader_get_flash_layout_frame,
     build_bootloader_get_info_frame,
+    build_bootloader_run_flash_self_test_frame,
     build_diag_read_counter_frame,
     build_diag_reset_all_frame,
     build_command_frame,
     build_command_mask,
     command_id,
+    decode_bootloader_flash_layout_frame,
+    decode_bootloader_flash_self_test_frame,
     decode_bootloader_info_frame,
     decode_diag_response_frame,
     decode_heartbeat_frame,
@@ -115,6 +119,24 @@ def test_bootloader_get_info_frame() -> None:
     assert frame.rtr is False
 
 
+def test_bootloader_get_flash_layout_frame() -> None:
+    frame = build_bootloader_get_flash_layout_frame(2)
+    assert frame.can_id == 0x552
+    assert frame.data == bytes([0x12, 0, 0, 0, 0, 0, 0, 0])
+    assert frame.dlc == 8
+    assert frame.extended is False
+    assert frame.rtr is False
+
+
+def test_bootloader_run_flash_self_test_frame() -> None:
+    frame = build_bootloader_run_flash_self_test_frame(2)
+    assert frame.can_id == 0x552
+    assert frame.data == bytes([0x20, 0xA5, 0x5A, 0, 0, 0, 0, 0])
+    assert frame.dlc == 8
+    assert frame.extended is False
+    assert frame.rtr is False
+
+
 def test_bootloader_info_response_decode() -> None:
     frame = CanFrame(can_id=0x560, data=bytes([0x91, 0x00, 1, 0, 1, 1, 0, 0]), dlc=8)
     response = decode_bootloader_info_frame(frame, 0)
@@ -124,6 +146,26 @@ def test_bootloader_info_response_decode() -> None:
     assert response.bl_minor == 0
     assert response.app_valid is True
     assert response.boot_mode_text == "BOOTLOADER"
+
+
+def test_bootloader_flash_layout_response_decode() -> None:
+    frame = CanFrame(can_id=0x560, data=bytes([0x92, 0x00, 1, 16, 47, 63, 0, 0]), dlc=8)
+    response = decode_bootloader_flash_layout_frame(frame, 0)
+    assert response is not None
+    assert response.status_text == "OK"
+    assert response.page_kb == 1
+    assert response.boot_kb == 16
+    assert response.app_kb == 47
+    assert response.scratch_page_index == 63
+
+
+def test_bootloader_flash_self_test_response_decode() -> None:
+    frame = CanFrame(can_id=0x560, data=bytes([0xA0, 0x00, 0, 0, 0, 0, 0, 0]), dlc=8)
+    response = decode_bootloader_flash_self_test_frame(frame, 0)
+    assert response is not None
+    assert response.status_text == "OK"
+    assert response.stage_text == "DONE"
+    assert response.detail == bytes([0, 0, 0, 0, 0])
 
 
 def test_diag_counter_response_decode() -> None:

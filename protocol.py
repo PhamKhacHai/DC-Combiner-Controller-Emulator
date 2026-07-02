@@ -4,6 +4,8 @@ import time
 
 from models import (
     BoardStatus,
+    BootloaderFlashLayoutResponse,
+    BootloaderFlashSelfTestResponse,
     BootloaderInfoResponse,
     CanFrame,
     DiagnosticCounterResponse,
@@ -54,9 +56,13 @@ DIAG_GROUP_GLOBAL = 0xFF
 
 BOOTLOADER_CMD_ENTER = 0x10
 BOOTLOADER_CMD_GET_BOOT_INFO = 0x11
+BOOTLOADER_CMD_GET_FLASH_LAYOUT = 0x12
+BOOTLOADER_CMD_RUN_FLASH_SELF_TEST = 0x20
 BOOTLOADER_ENTER_MAGIC_1 = 0xA5
 BOOTLOADER_ENTER_MAGIC_2 = 0x5A
 BOOTLOADER_RESP_GET_BOOT_INFO = 0x91
+BOOTLOADER_RESP_GET_FLASH_LAYOUT = 0x92
+BOOTLOADER_RESP_FLASH_SELF_TEST = 0xA0
 BOOTLOADER_STATUS_OK = 0x00
 BOOTLOADER_STATUS_UNKNOWN_COMMAND = 0x01
 BOOTLOADER_STATUS_BAD_DLC = 0x02
@@ -66,6 +72,48 @@ BOOTLOADER_STATUS_TEXT: dict[int, str] = {
     BOOTLOADER_STATUS_OK: "OK",
     BOOTLOADER_STATUS_UNKNOWN_COMMAND: "UNKNOWN_COMMAND",
     BOOTLOADER_STATUS_BAD_DLC: "BAD_DLC",
+}
+
+BOOTLOADER_FLASH_STATUS_OK = 0x00
+BOOTLOADER_FLASH_STATUS_BAD_MAGIC = 0x01
+BOOTLOADER_FLASH_STATUS_ADDRESS_RANGE_ERROR = 0x02
+BOOTLOADER_FLASH_STATUS_UNLOCK_FAIL = 0x03
+BOOTLOADER_FLASH_STATUS_ERASE_FAIL = 0x04
+BOOTLOADER_FLASH_STATUS_ERASE_VERIFY_FAIL = 0x05
+BOOTLOADER_FLASH_STATUS_PROGRAM_FAIL = 0x06
+BOOTLOADER_FLASH_STATUS_PROGRAM_VERIFY_FAIL = 0x07
+BOOTLOADER_FLASH_STATUS_LOCK_FAIL = 0x08
+
+BOOTLOADER_FLASH_STAGE_DONE = 0x00
+BOOTLOADER_FLASH_STAGE_UNLOCK = 0x01
+BOOTLOADER_FLASH_STAGE_ERASE = 0x02
+BOOTLOADER_FLASH_STAGE_ERASE_VERIFY = 0x03
+BOOTLOADER_FLASH_STAGE_PROGRAM = 0x04
+BOOTLOADER_FLASH_STAGE_PROGRAM_VERIFY = 0x05
+BOOTLOADER_FLASH_STAGE_FINAL_ERASE = 0x06
+BOOTLOADER_FLASH_STAGE_LOCK = 0x07
+
+BOOTLOADER_FLASH_STATUS_TEXT: dict[int, str] = {
+    BOOTLOADER_FLASH_STATUS_OK: "OK",
+    BOOTLOADER_FLASH_STATUS_BAD_MAGIC: "BAD_MAGIC",
+    BOOTLOADER_FLASH_STATUS_ADDRESS_RANGE_ERROR: "ADDRESS_RANGE_ERROR",
+    BOOTLOADER_FLASH_STATUS_UNLOCK_FAIL: "FLASH_UNLOCK_FAIL",
+    BOOTLOADER_FLASH_STATUS_ERASE_FAIL: "ERASE_FAIL",
+    BOOTLOADER_FLASH_STATUS_ERASE_VERIFY_FAIL: "ERASE_VERIFY_FAIL",
+    BOOTLOADER_FLASH_STATUS_PROGRAM_FAIL: "PROGRAM_FAIL",
+    BOOTLOADER_FLASH_STATUS_PROGRAM_VERIFY_FAIL: "PROGRAM_VERIFY_FAIL",
+    BOOTLOADER_FLASH_STATUS_LOCK_FAIL: "FLASH_LOCK_FAIL",
+}
+
+BOOTLOADER_FLASH_STAGE_TEXT: dict[int, str] = {
+    BOOTLOADER_FLASH_STAGE_DONE: "DONE",
+    BOOTLOADER_FLASH_STAGE_UNLOCK: "UNLOCK",
+    BOOTLOADER_FLASH_STAGE_ERASE: "ERASE",
+    BOOTLOADER_FLASH_STAGE_ERASE_VERIFY: "ERASE_VERIFY",
+    BOOTLOADER_FLASH_STAGE_PROGRAM: "PROGRAM",
+    BOOTLOADER_FLASH_STAGE_PROGRAM_VERIFY: "PROGRAM_VERIFY",
+    BOOTLOADER_FLASH_STAGE_FINAL_ERASE: "FINAL_ERASE",
+    BOOTLOADER_FLASH_STAGE_LOCK: "LOCK",
 }
 
 DIAG_COUNTER_CONTACTOR_CLOSE = 0x01
@@ -268,6 +316,30 @@ def build_bootloader_get_info_frame(node_id: int) -> CanFrame:
     )
 
 
+def build_bootloader_get_flash_layout_frame(node_id: int) -> CanFrame:
+    data = bytes([BOOTLOADER_CMD_GET_FLASH_LAYOUT, 0, 0, 0, 0, 0, 0, 0])
+    return CanFrame(
+        can_id=bootloader_request_id(node_id),
+        data=data,
+        dlc=8,
+        extended=False,
+        rtr=False,
+        timestamp=time.time(),
+    )
+
+
+def build_bootloader_run_flash_self_test_frame(node_id: int) -> CanFrame:
+    data = bytes([BOOTLOADER_CMD_RUN_FLASH_SELF_TEST, BOOTLOADER_ENTER_MAGIC_1, BOOTLOADER_ENTER_MAGIC_2, 0, 0, 0, 0, 0])
+    return CanFrame(
+        can_id=bootloader_request_id(node_id),
+        data=data,
+        dlc=8,
+        extended=False,
+        rtr=False,
+        timestamp=time.time(),
+    )
+
+
 def decode_status_frame(frame: CanFrame, node_id: int) -> BoardStatus | None:
     if frame.can_id != status_id(node_id):
         return None
@@ -380,12 +452,62 @@ def decode_bootloader_info_frame(frame: CanFrame, node_id: int) -> BootloaderInf
     )
 
 
+def decode_bootloader_flash_layout_frame(frame: CanFrame, node_id: int) -> BootloaderFlashLayoutResponse | None:
+    if frame.can_id != bootloader_response_id(node_id):
+        return None
+    if frame.dlc < 8 or len(frame.data) < 8:
+        return None
+
+    data = frame.data
+    if data[0] != BOOTLOADER_RESP_GET_FLASH_LAYOUT:
+        return None
+
+    return BootloaderFlashLayoutResponse(
+        response_type=data[0],
+        status=data[1],
+        status_text=bootloader_status_to_text(data[1]),
+        page_kb=data[2],
+        boot_kb=data[3],
+        app_kb=data[4],
+        scratch_page_index=data[5],
+        flags=data[6],
+    )
+
+
+def decode_bootloader_flash_self_test_frame(frame: CanFrame, node_id: int) -> BootloaderFlashSelfTestResponse | None:
+    if frame.can_id != bootloader_response_id(node_id):
+        return None
+    if frame.dlc < 8 or len(frame.data) < 8:
+        return None
+
+    data = frame.data
+    if data[0] != BOOTLOADER_RESP_FLASH_SELF_TEST:
+        return None
+
+    return BootloaderFlashSelfTestResponse(
+        response_type=data[0],
+        status=data[1],
+        status_text=bootloader_flash_status_to_text(data[1]),
+        stage=data[2],
+        stage_text=bootloader_flash_stage_to_text(data[2]),
+        detail=bytes(data[3:8]),
+    )
+
+
 def diag_status_to_text(status: int) -> str:
     return DIAG_STATUS_TEXT.get(status, f"UNKNOWN_STATUS_0x{status:02X}")
 
 
 def bootloader_status_to_text(status: int) -> str:
     return BOOTLOADER_STATUS_TEXT.get(status, f"UNKNOWN_STATUS_0x{status:02X}")
+
+
+def bootloader_flash_status_to_text(status: int) -> str:
+    return BOOTLOADER_FLASH_STATUS_TEXT.get(status, f"UNKNOWN_STATUS_0x{status:02X}")
+
+
+def bootloader_flash_stage_to_text(stage: int) -> str:
+    return BOOTLOADER_FLASH_STAGE_TEXT.get(stage, f"UNKNOWN_STAGE_0x{stage:02X}")
 
 
 def counter_id_to_name(counter_id: int) -> str:
