@@ -3,7 +3,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from main import MainWindow
 from models import BoardStatus
@@ -382,6 +382,362 @@ def test_enter_bootloader_stops_periodic_and_sends_current_node_frame() -> None:
         app.processEvents()
 
 
+def test_get_boot_info_sends_request_and_logs_response() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+
+    try:
+        window.connect_can()
+        window.poll_rx()
+        window.node_spin.setValue(4)
+
+        frame = window.get_boot_info()
+
+        assert frame is not None
+        assert frame.can_id == 0x554
+        assert frame.data == bytes([0x11, 0, 0, 0, 0, 0, 0, 0])
+        assert window.controller.last_boot_info_response is not None
+        assert "TX BOOT ID=0x554 DLC=8 DATA=11 00 00 00 00 00 00 00" in window.log_text.toPlainText()
+        assert (
+            "RX BOOT ID=0x564 DLC=8 DATA=91 00 01 00 01 01 00 00 "
+            "BL=1.0 APP_VALID=1 MODE=BOOTLOADER"
+        ) in window.log_text.toPlainText()
+    finally:
+        window.rx_timer.stop()
+        window.close()
+        app.processEvents()
+
+
+def test_get_flash_layout_sends_request_and_logs_response() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+
+    try:
+        window.connect_can()
+        window.poll_rx()
+        window.node_spin.setValue(4)
+
+        frame = window.get_flash_layout()
+
+        assert frame is not None
+        assert frame.can_id == 0x554
+        assert frame.data == bytes([0x12, 0, 0, 0, 0, 0, 0, 0])
+        assert window.controller.last_flash_layout_response is not None
+        assert "TX BOOT ID=0x554 DLC=8 DATA=12 00 00 00 00 00 00 00" in window.log_text.toPlainText()
+        assert (
+            "RX BOOT ID=0x564 DLC=8 DATA=92 00 01 10 2F 3F 00 00 "
+            "PAGE=1KB BOOT=16KB APP=47KB SCRATCH_PAGE=63"
+        ) in window.log_text.toPlainText()
+    finally:
+        window.rx_timer.stop()
+        window.close()
+        app.processEvents()
+
+
+def test_refresh_bootloader_status_updates_info_labels() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+
+    try:
+        window.connect_can()
+        window.poll_rx()
+        window.node_spin.setValue(4)
+
+        window.refresh_bootloader_status()
+
+        sent_commands = [frame.data[0] for frame in window.driver.tx_frames if frame.data]
+        assert sent_commands[-6:] == [0x11, 0x13, 0x14, 0x15, 0x16, 0x17]
+        assert window.boot_status_labels["bootloader_version"].text() == "1.0"
+        assert window.boot_status_labels["mode"].text() == "BOOTLOADER"
+        assert window.boot_status_labels["app_valid"].text() == "Yes"
+        assert window.boot_status_labels["vector_valid"].text() == "Yes"
+        assert window.boot_status_labels["metadata_state"].text() == "VALID"
+        assert window.boot_status_labels["metadata_version"].text() == "1.0"
+        assert window.boot_status_labels["crc_match"].text() == "Yes"
+        assert window.boot_status_labels["recovery_hint"].text() == "Reset To App is allowed."
+        assert "APP_STATUS STATUS=OK META=VALID" in window.log_text.toPlainText()
+        assert "FLASH_CRC STATUS=OK" in window.log_text.toPlainText()
+    finally:
+        window.rx_timer.stop()
+        window.close()
+        app.processEvents()
+
+
+def test_refresh_bootloader_status_no_response_logs_light_message() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+
+    try:
+        window.connect_can()
+        window.poll_rx()
+        window.wait_for_history_item = lambda history, start_count, timeout_ms: None
+
+        window.refresh_bootloader_status()
+
+        log_text = window.log_text.toPlainText()
+        assert "No bootloader response. Enter bootloader first." in log_text
+        assert "No response for GET_APP_STATUS_SUMMARY" not in log_text
+        assert window.boot_status_labels["bootloader_version"].text() == "-"
+    finally:
+        window.rx_timer.stop()
+        window.close()
+        app.processEvents()
+
+
+def test_run_flash_self_test_sends_request_and_logs_response() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+
+    try:
+        window.connect_can()
+        window.poll_rx()
+        window.node_spin.setValue(4)
+
+        frame = window.run_flash_self_test(confirm=False)
+
+        assert frame is None
+        assert window.driver.tx_frames == []
+        assert "Flash self-test disabled" in window.log_text.toPlainText()
+    finally:
+        window.rx_timer.stop()
+        window.close()
+        app.processEvents()
+
+
+def test_start_firmware_update_runs_mock_flow(tmp_path) -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+
+    app_bin = (
+        (0x20001000).to_bytes(4, "little") +
+        (0x08004101).to_bytes(4, "little") +
+        bytes(range(32))
+    )
+    app_path = tmp_path / "app.bin"
+    app_path.write_bytes(app_bin)
+
+    try:
+        window.connect_can()
+        window.poll_rx()
+        window.node_spin.setValue(4)
+        info = window.load_app_bin(str(app_path))
+
+        assert info is not None
+        assert info.valid is True
+
+        window.start_firmware_update(confirm=False)
+
+        log_text = window.log_text.toPlainText()
+        assert "START_UPDATE OK" in log_text
+        assert "ERASE_APP OK" in log_text
+        assert "VERIFY_CRC OK" in log_text
+        assert "FINISH_UPDATE OK metadata valid" in log_text
+        assert "FIRMWARE_UPDATE DONE" in log_text
+        assert window.update_progress.value() == 100
+        assert window.update_state == "DONE"
+        assert window.update_state_label.text() == "DONE"
+        assert not window.abort_update_button.isEnabled()
+        assert window.reset_to_app_button.isEnabled()
+    finally:
+        window.rx_timer.stop()
+        window.close()
+        app.processEvents()
+
+
+def test_abort_update_mid_write_stops_further_chunks(tmp_path) -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+
+    app_bin = (
+        (0x20001000).to_bytes(4, "little") +
+        (0x08004101).to_bytes(4, "little") +
+        bytes(range(80))
+    )
+    app_path = tmp_path / "app.bin"
+    app_path.write_bytes(app_bin)
+
+    original_wait = window.wait_for_history_item
+
+    def abort_after_third_chunk(history: list, start_count: int, timeout_ms: int) -> object | None:
+        response = original_wait(history, start_count, timeout_ms)
+        if (
+            history is window.controller.write_chunk_response_history and
+            len(history) >= 3 and
+            not window.update_abort_requested
+        ):
+            window.abort_update()
+        return response
+
+    try:
+        window.connect_can()
+        window.poll_rx()
+        window.load_app_bin(str(app_path))
+        window.wait_for_history_item = abort_after_third_chunk
+
+        window.start_firmware_update(confirm=False)
+
+        log_text = window.log_text.toPlainText()
+        write_sequences = [
+            int.from_bytes(frame.data[1:3], "little")
+            for frame in window.driver.tx_frames
+            if frame.data and frame.data[0] == 0x32
+        ]
+
+        assert write_sequences == [0, 1, 2]
+        assert any(frame.data and frame.data[0] == 0x35 for frame in window.driver.tx_frames)
+        assert "Firmware update aborted by user." in log_text
+        assert "Firmware update stopped after user abort." in log_text
+        assert "ERROR firmware update stopped" not in log_text
+        assert window.update_state == "ABORTED"
+        assert window.start_update_button.isEnabled()
+        assert not window.abort_update_button.isEnabled()
+        assert not window.reset_to_app_button.isEnabled()
+    finally:
+        window.rx_timer.stop()
+        window.close()
+        app.processEvents()
+
+
+def test_late_write_bad_state_after_abort_is_ignored(tmp_path) -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+
+    app_bin = (
+        (0x20001000).to_bytes(4, "little") +
+        (0x08004101).to_bytes(4, "little") +
+        bytes(range(24))
+    )
+    app_path = tmp_path / "app.bin"
+    app_path.write_bytes(app_bin)
+    original_send_write_chunk = window.controller.send_write_chunk
+    abort_sent = False
+
+    def send_late_chunk_after_abort(sequence: int, payload: bytes):
+        nonlocal abort_sent
+        if sequence == 1 and not abort_sent:
+            abort_sent = True
+            window.abort_update()
+        return original_send_write_chunk(sequence, payload)
+
+    try:
+        window.connect_can()
+        window.poll_rx()
+        window.load_app_bin(str(app_path))
+        window.controller.send_write_chunk = send_late_chunk_after_abort
+
+        window.start_firmware_update(confirm=False)
+
+        log_text = window.log_text.toPlainText()
+        assert "Firmware update aborted by user." in log_text
+        assert "Late WRITE_CHUNK response ignored after abort." in log_text
+        assert "ERROR firmware update stopped" not in log_text
+        assert window.update_state == "ABORTED"
+    finally:
+        window.rx_timer.stop()
+        window.close()
+        app.processEvents()
+
+
+def test_force_bad_crc_stops_before_finish_and_disables_reset(tmp_path, monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+    monkeypatch.setattr(QMessageBox, "warning", lambda *args, **kwargs: QMessageBox.StandardButton.Ok)
+
+    app_bin = (
+        (0x20001000).to_bytes(4, "little") +
+        (0x08004101).to_bytes(4, "little") +
+        bytes(range(32))
+    )
+    app_path = tmp_path / "app.bin"
+    app_path.write_bytes(app_bin)
+
+    try:
+        window.connect_can()
+        window.poll_rx()
+        window.load_app_bin(str(app_path))
+        window.force_bad_crc_check.setChecked(True)
+
+        window.start_firmware_update(confirm=False)
+
+        log_text = window.log_text.toPlainText()
+        sent_commands = [frame.data[0] for frame in window.driver.tx_frames if frame.data]
+        assert 0x33 in sent_commands
+        assert 0x34 not in sent_commands
+        assert "Force Bad CRC enabled" in log_text
+        assert "VERIFY_CRC failed: CRC_MISMATCH" in log_text
+        assert "FINISH_UPDATE OK metadata valid" not in log_text
+        assert window.update_state == "FAILED"
+        assert window.start_update_button.isEnabled()
+        assert not window.reset_to_app_button.isEnabled()
+    finally:
+        window.rx_timer.stop()
+        window.close()
+        app.processEvents()
+
+
+def test_stop_after_chunks_stops_without_abort_for_power_loss_test(tmp_path) -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+
+    app_bin = (
+        (0x20001000).to_bytes(4, "little") +
+        (0x08004101).to_bytes(4, "little") +
+        bytes(range(80))
+    )
+    app_path = tmp_path / "app.bin"
+    app_path.write_bytes(app_bin)
+
+    try:
+        window.connect_can()
+        window.poll_rx()
+        window.load_app_bin(str(app_path))
+        window.stop_after_chunks_spin.setValue(3)
+
+        window.start_firmware_update(confirm=False)
+
+        log_text = window.log_text.toPlainText()
+        write_sequences = [
+            int.from_bytes(frame.data[1:3], "little")
+            for frame in window.driver.tx_frames
+            if frame.data and frame.data[0] == 0x32
+        ]
+        sent_commands = [frame.data[0] for frame in window.driver.tx_frames if frame.data]
+
+        assert write_sequences == [0, 1, 2]
+        assert 0x35 not in sent_commands
+        assert 0x33 not in sent_commands
+        assert 0x34 not in sent_commands
+        assert "Advanced stop after 3 chunks reached" in log_text
+        assert "No ABORT_UPDATE sent" in log_text
+        assert window.update_state == "FAILED"
+        assert window.start_update_button.isEnabled()
+        assert not window.reset_to_app_button.isEnabled()
+    finally:
+        window.rx_timer.stop()
+        window.close()
+        app.processEvents()
+
+
+def test_invalid_app_bin_blocks_update(tmp_path) -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+    app_path = tmp_path / "bad.bin"
+    app_path.write_bytes(b"too small")
+
+    try:
+        window.connect_can()
+        window.poll_rx()
+        info = window.load_app_bin(str(app_path))
+
+        assert info is not None
+        assert info.valid is False
+        assert not window.start_update_button.isEnabled()
+    finally:
+        window.rx_timer.stop()
+        window.close()
+        app.processEvents()
+
+
 def test_disconnect_clears_start_button_active_state() -> None:
     app = QApplication.instance() or QApplication([])
     window = MainWindow()
@@ -446,6 +802,9 @@ def test_one_shot_buttons_do_not_get_toggle_active_state() -> None:
             window.off_button,
             window.clear_fault_button,
             window.bootloader_button,
+            window.boot_info_button,
+            window.flash_layout_button,
+            window.flash_self_test_button,
             window.clear_log_button,
             window.diag_read_selected_button,
             window.diag_read_all_button,
