@@ -9,11 +9,16 @@ from protocol import (
     bootloader_request_id,
     bootloader_response_id,
     build_bootloader_abort_update_frame,
+    build_bootloader_check_app_flash_crc_frame,
     build_bootloader_enter_frame,
     build_bootloader_erase_app_frame,
     build_bootloader_finish_update_frame,
+    build_bootloader_get_app_size_info_frame,
+    build_bootloader_get_app_status_summary_frame,
+    build_bootloader_get_app_stored_crc_frame,
     build_bootloader_get_flash_layout_frame,
     build_bootloader_get_info_frame,
+    build_bootloader_get_metadata_version_info_frame,
     build_bootloader_reset_to_app_frame,
     build_bootloader_run_flash_self_test_frame,
     build_bootloader_start_update_frame,
@@ -24,10 +29,15 @@ from protocol import (
     build_command_frame,
     build_command_mask,
     command_id,
+    decode_bootloader_app_size_info_frame,
+    decode_bootloader_app_status_summary_frame,
+    decode_bootloader_computed_crc_frame,
     decode_bootloader_flash_layout_frame,
     decode_bootloader_flash_self_test_frame,
     decode_bootloader_info_frame,
+    decode_bootloader_metadata_version_frame,
     decode_bootloader_start_update_frame,
+    decode_bootloader_stored_crc_frame,
     decode_bootloader_write_chunk_frame,
     decode_bootloader_verify_crc_frame,
     decode_diag_response_frame,
@@ -139,6 +149,14 @@ def test_bootloader_get_flash_layout_frame() -> None:
     assert frame.rtr is False
 
 
+def test_bootloader_milestone7_info_request_frames() -> None:
+    assert build_bootloader_get_app_status_summary_frame(2).data == bytes([0x13, 0, 0, 0, 0, 0, 0, 0])
+    assert build_bootloader_get_app_size_info_frame(2).data == bytes([0x14, 0, 0, 0, 0, 0, 0, 0])
+    assert build_bootloader_get_app_stored_crc_frame(2).data == bytes([0x15, 0, 0, 0, 0, 0, 0, 0])
+    assert build_bootloader_check_app_flash_crc_frame(2).data == bytes([0x16, 0xA5, 0x5A, 0, 0, 0, 0, 0])
+    assert build_bootloader_get_metadata_version_info_frame(2).data == bytes([0x17, 0, 0, 0, 0, 0, 0, 0])
+
+
 def test_bootloader_run_flash_self_test_frame() -> None:
     frame = build_bootloader_run_flash_self_test_frame(2)
     assert frame.can_id == 0x552
@@ -191,6 +209,56 @@ def test_bootloader_flash_self_test_response_decode() -> None:
     assert response.status_text == "OK"
     assert response.stage_text == "DONE"
     assert response.detail == bytes([0, 0, 0, 0, 0])
+
+
+def test_bootloader_milestone7_info_response_decode() -> None:
+    app_status = decode_bootloader_app_status_summary_frame(
+        CanFrame(can_id=0x560, data=bytes([0x93, 0x00, 0x01, 1, 1, 0, 0, 0x0F]), dlc=8),
+        0,
+    )
+    assert app_status is not None
+    assert app_status.status_text == "OK"
+    assert app_status.metadata_state_text == "VALID"
+    assert app_status.app_valid is True
+    assert app_status.vector_valid is True
+    assert app_status.info_source_text == "METADATA"
+    assert app_status.session_state_text == "IDLE"
+
+    app_size = decode_bootloader_app_size_info_frame(
+        CanFrame(can_id=0x560, data=bytes([0x94, 0x00, 0x20, 0x4C, 0, 0, 47, 1]), dlc=8),
+        0,
+    )
+    assert app_size is not None
+    assert app_size.app_size == 0x4C20
+    assert app_size.max_app_kb == 47
+    assert app_size.size_available is True
+
+    stored_crc = decode_bootloader_stored_crc_frame(
+        CanFrame(can_id=0x560, data=bytes([0x95, 0x00, 0x71, 0x08, 0xF3, 0x93, 1, 1]), dlc=8),
+        0,
+    )
+    assert stored_crc is not None
+    assert stored_crc.stored_crc32 == 0x93F30871
+    assert stored_crc.crc_source_text == "METADATA"
+    assert stored_crc.crc_available is True
+
+    computed_crc = decode_bootloader_computed_crc_frame(
+        CanFrame(can_id=0x560, data=bytes([0x96, 0x00, 0x71, 0x08, 0xF3, 0x93, 1, 0x0F]), dlc=8),
+        0,
+    )
+    assert computed_crc is not None
+    assert computed_crc.computed_crc32 == 0x93F30871
+    assert computed_crc.crc_match is True
+    assert computed_crc.crc_available is True
+
+    metadata_version = decode_bootloader_metadata_version_frame(
+        CanFrame(can_id=0x560, data=bytes([0x97, 0x00, 0, 0, 1, 0, 1, 1]), dlc=8),
+        0,
+    )
+    assert metadata_version is not None
+    assert metadata_version.metadata_version == 0x00010000
+    assert metadata_version.magic_ok is True
+    assert metadata_version.version_available is True
 
 
 def test_bootloader_update_response_decode() -> None:

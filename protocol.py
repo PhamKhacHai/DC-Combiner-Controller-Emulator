@@ -6,12 +6,17 @@ import time
 from models import (
     AppBinInfo,
     BoardStatus,
+    BootloaderAppSizeInfoResponse,
+    BootloaderAppStatusSummaryResponse,
+    BootloaderComputedCrcResponse,
     BootloaderEraseAppResponse,
     BootloaderFlashLayoutResponse,
     BootloaderFlashSelfTestResponse,
     BootloaderInfoResponse,
+    BootloaderMetadataVersionResponse,
     BootloaderSimpleUpdateResponse,
     BootloaderStartUpdateResponse,
+    BootloaderStoredCrcResponse,
     BootloaderVerifyCrcResponse,
     BootloaderWriteChunkResponse,
     CanFrame,
@@ -64,6 +69,11 @@ DIAG_GROUP_GLOBAL = 0xFF
 BOOTLOADER_CMD_ENTER = 0x10
 BOOTLOADER_CMD_GET_BOOT_INFO = 0x11
 BOOTLOADER_CMD_GET_FLASH_LAYOUT = 0x12
+BOOTLOADER_CMD_GET_APP_STATUS_SUMMARY = 0x13
+BOOTLOADER_CMD_GET_APP_SIZE_INFO = 0x14
+BOOTLOADER_CMD_GET_APP_STORED_CRC = 0x15
+BOOTLOADER_CMD_CHECK_APP_FLASH_CRC = 0x16
+BOOTLOADER_CMD_GET_METADATA_VERSION_INFO = 0x17
 BOOTLOADER_CMD_RUN_FLASH_SELF_TEST = 0x20
 BOOTLOADER_CMD_START_UPDATE = 0x30
 BOOTLOADER_CMD_ERASE_APP = 0x31
@@ -76,6 +86,11 @@ BOOTLOADER_ENTER_MAGIC_1 = 0xA5
 BOOTLOADER_ENTER_MAGIC_2 = 0x5A
 BOOTLOADER_RESP_GET_BOOT_INFO = 0x91
 BOOTLOADER_RESP_GET_FLASH_LAYOUT = 0x92
+BOOTLOADER_RESP_APP_STATUS_SUMMARY = 0x93
+BOOTLOADER_RESP_APP_SIZE_INFO = 0x94
+BOOTLOADER_RESP_APP_STORED_CRC = 0x95
+BOOTLOADER_RESP_APP_FLASH_CRC = 0x96
+BOOTLOADER_RESP_METADATA_VERSION_INFO = 0x97
 BOOTLOADER_RESP_FLASH_SELF_TEST = 0xA0
 BOOTLOADER_RESP_START_UPDATE = 0xB0
 BOOTLOADER_RESP_ERASE_APP = 0xB1
@@ -88,6 +103,26 @@ BOOTLOADER_STATUS_OK = 0x00
 BOOTLOADER_STATUS_UNKNOWN_COMMAND = 0x01
 BOOTLOADER_STATUS_BAD_DLC = 0x02
 BOOTLOADER_MODE_ACTIVE = 0x01
+
+BOOTLOADER_METADATA_STATE_BLANK = 0x00
+BOOTLOADER_METADATA_STATE_VALID = 0x01
+BOOTLOADER_METADATA_STATE_IN_PROGRESS = 0x02
+BOOTLOADER_METADATA_STATE_INVALID = 0x03
+BOOTLOADER_METADATA_STATE_CORRUPT = 0x04
+BOOTLOADER_METADATA_STATE_UNKNOWN = 0x05
+
+BOOTLOADER_INFO_SOURCE_METADATA = 0x00
+BOOTLOADER_INFO_SOURCE_LEGACY_BLANK = 0x01
+BOOTLOADER_INFO_SOURCE_CORRUPT = 0x02
+BOOTLOADER_INFO_SOURCE_NO_VALID_APP = 0x03
+
+BOOTLOADER_CRC_SOURCE_NONE = 0x00
+BOOTLOADER_CRC_SOURCE_METADATA = 0x01
+
+BOOTLOADER_INFO_FLAG_VALUE_AVAILABLE = 0x01
+BOOTLOADER_INFO_FLAG_STORED_AVAILABLE = 0x02
+BOOTLOADER_INFO_FLAG_COMPUTED_AVAILABLE = 0x04
+BOOTLOADER_INFO_FLAG_CRC_MATCH = 0x08
 
 APP_BASE_ADDR = 0x08004000
 APP_END_ADDR = 0x0800FBFF
@@ -154,6 +189,27 @@ BOOTLOADER_UPDATE_STATE_TEXT: dict[int, str] = {
     BOOTLOADER_UPDATE_STATE_CRC_OK: "CRC_OK",
     BOOTLOADER_UPDATE_STATE_FINISHED: "FINISHED",
     BOOTLOADER_UPDATE_STATE_ERROR: "ERROR",
+}
+
+BOOTLOADER_METADATA_STATE_TEXT: dict[int, str] = {
+    BOOTLOADER_METADATA_STATE_BLANK: "BLANK",
+    BOOTLOADER_METADATA_STATE_VALID: "VALID",
+    BOOTLOADER_METADATA_STATE_IN_PROGRESS: "IN_PROGRESS",
+    BOOTLOADER_METADATA_STATE_INVALID: "INVALID",
+    BOOTLOADER_METADATA_STATE_CORRUPT: "CORRUPT",
+    BOOTLOADER_METADATA_STATE_UNKNOWN: "UNKNOWN",
+}
+
+BOOTLOADER_INFO_SOURCE_TEXT: dict[int, str] = {
+    BOOTLOADER_INFO_SOURCE_METADATA: "METADATA",
+    BOOTLOADER_INFO_SOURCE_LEGACY_BLANK: "LEGACY_BLANK_METADATA_VECTOR_VALID",
+    BOOTLOADER_INFO_SOURCE_CORRUPT: "METADATA_CORRUPT",
+    BOOTLOADER_INFO_SOURCE_NO_VALID_APP: "NO_VALID_APP",
+}
+
+BOOTLOADER_CRC_SOURCE_TEXT: dict[int, str] = {
+    BOOTLOADER_CRC_SOURCE_NONE: "NONE",
+    BOOTLOADER_CRC_SOURCE_METADATA: "METADATA",
 }
 
 BOOTLOADER_FLASH_STATUS_OK = 0x00
@@ -400,6 +456,66 @@ def build_bootloader_get_info_frame(node_id: int) -> CanFrame:
 
 def build_bootloader_get_flash_layout_frame(node_id: int) -> CanFrame:
     data = bytes([BOOTLOADER_CMD_GET_FLASH_LAYOUT, 0, 0, 0, 0, 0, 0, 0])
+    return CanFrame(
+        can_id=bootloader_request_id(node_id),
+        data=data,
+        dlc=8,
+        extended=False,
+        rtr=False,
+        timestamp=time.time(),
+    )
+
+
+def build_bootloader_get_app_status_summary_frame(node_id: int) -> CanFrame:
+    data = bytes([BOOTLOADER_CMD_GET_APP_STATUS_SUMMARY, 0, 0, 0, 0, 0, 0, 0])
+    return CanFrame(
+        can_id=bootloader_request_id(node_id),
+        data=data,
+        dlc=8,
+        extended=False,
+        rtr=False,
+        timestamp=time.time(),
+    )
+
+
+def build_bootloader_get_app_size_info_frame(node_id: int) -> CanFrame:
+    data = bytes([BOOTLOADER_CMD_GET_APP_SIZE_INFO, 0, 0, 0, 0, 0, 0, 0])
+    return CanFrame(
+        can_id=bootloader_request_id(node_id),
+        data=data,
+        dlc=8,
+        extended=False,
+        rtr=False,
+        timestamp=time.time(),
+    )
+
+
+def build_bootloader_get_app_stored_crc_frame(node_id: int) -> CanFrame:
+    data = bytes([BOOTLOADER_CMD_GET_APP_STORED_CRC, 0, 0, 0, 0, 0, 0, 0])
+    return CanFrame(
+        can_id=bootloader_request_id(node_id),
+        data=data,
+        dlc=8,
+        extended=False,
+        rtr=False,
+        timestamp=time.time(),
+    )
+
+
+def build_bootloader_check_app_flash_crc_frame(node_id: int) -> CanFrame:
+    data = bytes([BOOTLOADER_CMD_CHECK_APP_FLASH_CRC, BOOTLOADER_ENTER_MAGIC_1, BOOTLOADER_ENTER_MAGIC_2, 0, 0, 0, 0, 0])
+    return CanFrame(
+        can_id=bootloader_request_id(node_id),
+        data=data,
+        dlc=8,
+        extended=False,
+        rtr=False,
+        timestamp=time.time(),
+    )
+
+
+def build_bootloader_get_metadata_version_info_frame(node_id: int) -> CanFrame:
+    data = bytes([BOOTLOADER_CMD_GET_METADATA_VERSION_INFO, 0, 0, 0, 0, 0, 0, 0])
     return CanFrame(
         can_id=bootloader_request_id(node_id),
         data=data,
@@ -685,6 +801,117 @@ def decode_bootloader_flash_self_test_frame(frame: CanFrame, node_id: int) -> Bo
     )
 
 
+def decode_bootloader_app_status_summary_frame(frame: CanFrame, node_id: int) -> BootloaderAppStatusSummaryResponse | None:
+    if frame.can_id != bootloader_response_id(node_id):
+        return None
+    if frame.dlc < 8 or len(frame.data) < 8:
+        return None
+
+    data = frame.data
+    if data[0] != BOOTLOADER_RESP_APP_STATUS_SUMMARY:
+        return None
+
+    return BootloaderAppStatusSummaryResponse(
+        response_type=data[0],
+        status=data[1],
+        status_text=bootloader_update_status_to_text(data[1]),
+        metadata_state=data[2],
+        metadata_state_text=bootloader_metadata_state_to_text(data[2]),
+        app_valid=data[3] != 0,
+        vector_valid=data[4] != 0,
+        info_source=data[5],
+        info_source_text=bootloader_info_source_to_text(data[5]),
+        session_state=data[6],
+        session_state_text=bootloader_update_state_to_text(data[6]),
+        flags=data[7],
+    )
+
+
+def decode_bootloader_app_size_info_frame(frame: CanFrame, node_id: int) -> BootloaderAppSizeInfoResponse | None:
+    if frame.can_id != bootloader_response_id(node_id):
+        return None
+    if frame.dlc < 8 or len(frame.data) < 8:
+        return None
+
+    data = frame.data
+    if data[0] != BOOTLOADER_RESP_APP_SIZE_INFO:
+        return None
+
+    return BootloaderAppSizeInfoResponse(
+        response_type=data[0],
+        status=data[1],
+        status_text=bootloader_update_status_to_text(data[1]),
+        app_size=int.from_bytes(data[2:6], "little"),
+        max_app_kb=data[6],
+        flags=data[7],
+        size_available=(data[7] & BOOTLOADER_INFO_FLAG_VALUE_AVAILABLE) != 0,
+    )
+
+
+def decode_bootloader_stored_crc_frame(frame: CanFrame, node_id: int) -> BootloaderStoredCrcResponse | None:
+    if frame.can_id != bootloader_response_id(node_id):
+        return None
+    if frame.dlc < 8 or len(frame.data) < 8:
+        return None
+
+    data = frame.data
+    if data[0] != BOOTLOADER_RESP_APP_STORED_CRC:
+        return None
+
+    return BootloaderStoredCrcResponse(
+        response_type=data[0],
+        status=data[1],
+        status_text=bootloader_update_status_to_text(data[1]),
+        stored_crc32=int.from_bytes(data[2:6], "little"),
+        crc_source=data[6],
+        crc_source_text=bootloader_crc_source_to_text(data[6]),
+        flags=data[7],
+        crc_available=(data[7] & BOOTLOADER_INFO_FLAG_VALUE_AVAILABLE) != 0,
+    )
+
+
+def decode_bootloader_computed_crc_frame(frame: CanFrame, node_id: int) -> BootloaderComputedCrcResponse | None:
+    if frame.can_id != bootloader_response_id(node_id):
+        return None
+    if frame.dlc < 8 or len(frame.data) < 8:
+        return None
+
+    data = frame.data
+    if data[0] != BOOTLOADER_RESP_APP_FLASH_CRC:
+        return None
+
+    return BootloaderComputedCrcResponse(
+        response_type=data[0],
+        status=data[1],
+        status_text=bootloader_update_status_to_text(data[1]),
+        computed_crc32=int.from_bytes(data[2:6], "little"),
+        crc_match=data[6] != 0,
+        flags=data[7],
+        crc_available=(data[7] & BOOTLOADER_INFO_FLAG_COMPUTED_AVAILABLE) != 0,
+    )
+
+
+def decode_bootloader_metadata_version_frame(frame: CanFrame, node_id: int) -> BootloaderMetadataVersionResponse | None:
+    if frame.can_id != bootloader_response_id(node_id):
+        return None
+    if frame.dlc < 8 or len(frame.data) < 8:
+        return None
+
+    data = frame.data
+    if data[0] != BOOTLOADER_RESP_METADATA_VERSION_INFO:
+        return None
+
+    return BootloaderMetadataVersionResponse(
+        response_type=data[0],
+        status=data[1],
+        status_text=bootloader_update_status_to_text(data[1]),
+        metadata_version=int.from_bytes(data[2:6], "little"),
+        magic_ok=data[6] != 0,
+        flags=data[7],
+        version_available=(data[7] & BOOTLOADER_INFO_FLAG_VALUE_AVAILABLE) != 0,
+    )
+
+
 def decode_bootloader_start_update_frame(frame: CanFrame, node_id: int) -> BootloaderStartUpdateResponse | None:
     if frame.can_id != bootloader_response_id(node_id):
         return None
@@ -806,6 +1033,18 @@ def bootloader_update_status_to_text(status: int) -> str:
 
 def bootloader_update_state_to_text(state: int) -> str:
     return BOOTLOADER_UPDATE_STATE_TEXT.get(state, f"UNKNOWN_STATE_0x{state:02X}")
+
+
+def bootloader_metadata_state_to_text(state: int) -> str:
+    return BOOTLOADER_METADATA_STATE_TEXT.get(state, f"UNKNOWN_METADATA_STATE_0x{state:02X}")
+
+
+def bootloader_info_source_to_text(source: int) -> str:
+    return BOOTLOADER_INFO_SOURCE_TEXT.get(source, f"UNKNOWN_INFO_SOURCE_0x{source:02X}")
+
+
+def bootloader_crc_source_to_text(source: int) -> str:
+    return BOOTLOADER_CRC_SOURCE_TEXT.get(source, f"UNKNOWN_CRC_SOURCE_0x{source:02X}")
 
 
 def bootloader_update_response_name(response_type: int) -> str:

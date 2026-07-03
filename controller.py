@@ -3,12 +3,17 @@ from __future__ import annotations
 from can_driver import CanDriver
 from models import (
     BoardStatus,
+    BootloaderAppSizeInfoResponse,
+    BootloaderAppStatusSummaryResponse,
+    BootloaderComputedCrcResponse,
     BootloaderEraseAppResponse,
     BootloaderFlashLayoutResponse,
     BootloaderFlashSelfTestResponse,
     BootloaderInfoResponse,
+    BootloaderMetadataVersionResponse,
     BootloaderSimpleUpdateResponse,
     BootloaderStartUpdateResponse,
+    BootloaderStoredCrcResponse,
     BootloaderVerifyCrcResponse,
     BootloaderWriteChunkResponse,
     CanFrame,
@@ -21,11 +26,16 @@ from protocol import (
     CAN_BITRATE,
     COMMAND_CLEAR_FAULT_MASK,
     build_bootloader_abort_update_frame,
+    build_bootloader_check_app_flash_crc_frame,
     build_bootloader_enter_frame,
     build_bootloader_erase_app_frame,
     build_bootloader_finish_update_frame,
+    build_bootloader_get_app_size_info_frame,
+    build_bootloader_get_app_status_summary_frame,
+    build_bootloader_get_app_stored_crc_frame,
     build_bootloader_get_flash_layout_frame,
     build_bootloader_get_info_frame,
+    build_bootloader_get_metadata_version_info_frame,
     build_bootloader_reset_to_app_frame,
     build_bootloader_run_flash_self_test_frame,
     build_bootloader_start_update_frame,
@@ -35,12 +45,17 @@ from protocol import (
     build_command_mask,
     build_diag_read_counter_frame,
     build_diag_reset_all_frame,
+    decode_bootloader_app_size_info_frame,
+    decode_bootloader_app_status_summary_frame,
+    decode_bootloader_computed_crc_frame,
     decode_bootloader_erase_app_frame,
     decode_bootloader_flash_layout_frame,
     decode_bootloader_flash_self_test_frame,
     decode_bootloader_info_frame,
+    decode_bootloader_metadata_version_frame,
     decode_bootloader_simple_update_frame,
     decode_bootloader_start_update_frame,
+    decode_bootloader_stored_crc_frame,
     decode_bootloader_verify_crc_frame,
     decode_bootloader_write_chunk_frame,
     decode_diag_response_frame,
@@ -68,6 +83,16 @@ class ControllerSimulator:
         self.flash_layout_response_history: list[BootloaderFlashLayoutResponse] = []
         self.last_flash_self_test_response: BootloaderFlashSelfTestResponse | None = None
         self.flash_self_test_response_history: list[BootloaderFlashSelfTestResponse] = []
+        self.last_app_status_summary_response: BootloaderAppStatusSummaryResponse | None = None
+        self.app_status_summary_response_history: list[BootloaderAppStatusSummaryResponse] = []
+        self.last_app_size_info_response: BootloaderAppSizeInfoResponse | None = None
+        self.app_size_info_response_history: list[BootloaderAppSizeInfoResponse] = []
+        self.last_stored_crc_response: BootloaderStoredCrcResponse | None = None
+        self.stored_crc_response_history: list[BootloaderStoredCrcResponse] = []
+        self.last_computed_crc_response: BootloaderComputedCrcResponse | None = None
+        self.computed_crc_response_history: list[BootloaderComputedCrcResponse] = []
+        self.last_metadata_version_response: BootloaderMetadataVersionResponse | None = None
+        self.metadata_version_response_history: list[BootloaderMetadataVersionResponse] = []
         self.last_start_update_response: BootloaderStartUpdateResponse | None = None
         self.start_update_response_history: list[BootloaderStartUpdateResponse] = []
         self.last_erase_app_response: BootloaderEraseAppResponse | None = None
@@ -152,6 +177,46 @@ class ControllerSimulator:
             raise RuntimeError("CAN is not connected.")
 
         frame = build_bootloader_get_flash_layout_frame(self.node_id)
+        self.driver.send_frame(frame.can_id, frame.data, frame.extended, frame.rtr)
+        return frame
+
+    def send_get_app_status_summary(self) -> CanFrame:
+        if not self.connected or not self.driver.is_open():
+            raise RuntimeError("CAN is not connected.")
+
+        frame = build_bootloader_get_app_status_summary_frame(self.node_id)
+        self.driver.send_frame(frame.can_id, frame.data, frame.extended, frame.rtr)
+        return frame
+
+    def send_get_app_size_info(self) -> CanFrame:
+        if not self.connected or not self.driver.is_open():
+            raise RuntimeError("CAN is not connected.")
+
+        frame = build_bootloader_get_app_size_info_frame(self.node_id)
+        self.driver.send_frame(frame.can_id, frame.data, frame.extended, frame.rtr)
+        return frame
+
+    def send_get_app_stored_crc(self) -> CanFrame:
+        if not self.connected or not self.driver.is_open():
+            raise RuntimeError("CAN is not connected.")
+
+        frame = build_bootloader_get_app_stored_crc_frame(self.node_id)
+        self.driver.send_frame(frame.can_id, frame.data, frame.extended, frame.rtr)
+        return frame
+
+    def send_check_app_flash_crc(self) -> CanFrame:
+        if not self.connected or not self.driver.is_open():
+            raise RuntimeError("CAN is not connected.")
+
+        frame = build_bootloader_check_app_flash_crc_frame(self.node_id)
+        self.driver.send_frame(frame.can_id, frame.data, frame.extended, frame.rtr)
+        return frame
+
+    def send_get_metadata_version_info(self) -> CanFrame:
+        if not self.connected or not self.driver.is_open():
+            raise RuntimeError("CAN is not connected.")
+
+        frame = build_bootloader_get_metadata_version_info_frame(self.node_id)
         self.driver.send_frame(frame.can_id, frame.data, frame.extended, frame.rtr)
         return frame
 
@@ -259,6 +324,36 @@ class ControllerSimulator:
             if flash_self_test_response is not None:
                 self.last_flash_self_test_response = flash_self_test_response
                 self.flash_self_test_response_history.append(flash_self_test_response)
+                continue
+
+            app_status_summary_response = decode_bootloader_app_status_summary_frame(frame, self.node_id)
+            if app_status_summary_response is not None:
+                self.last_app_status_summary_response = app_status_summary_response
+                self.app_status_summary_response_history.append(app_status_summary_response)
+                continue
+
+            app_size_info_response = decode_bootloader_app_size_info_frame(frame, self.node_id)
+            if app_size_info_response is not None:
+                self.last_app_size_info_response = app_size_info_response
+                self.app_size_info_response_history.append(app_size_info_response)
+                continue
+
+            stored_crc_response = decode_bootloader_stored_crc_frame(frame, self.node_id)
+            if stored_crc_response is not None:
+                self.last_stored_crc_response = stored_crc_response
+                self.stored_crc_response_history.append(stored_crc_response)
+                continue
+
+            computed_crc_response = decode_bootloader_computed_crc_frame(frame, self.node_id)
+            if computed_crc_response is not None:
+                self.last_computed_crc_response = computed_crc_response
+                self.computed_crc_response_history.append(computed_crc_response)
+                continue
+
+            metadata_version_response = decode_bootloader_metadata_version_frame(frame, self.node_id)
+            if metadata_version_response is not None:
+                self.last_metadata_version_response = metadata_version_response
+                self.metadata_version_response_history.append(metadata_version_response)
                 continue
 
             start_update_response = decode_bootloader_start_update_frame(frame, self.node_id)

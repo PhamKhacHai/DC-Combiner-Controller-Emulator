@@ -35,12 +35,17 @@ from controller import ControllerSimulator
 from models import (
     AppBinInfo,
     BoardStatus,
+    BootloaderAppSizeInfoResponse,
+    BootloaderAppStatusSummaryResponse,
+    BootloaderComputedCrcResponse,
     BootloaderEraseAppResponse,
     BootloaderFlashLayoutResponse,
     BootloaderFlashSelfTestResponse,
     BootloaderInfoResponse,
+    BootloaderMetadataVersionResponse,
     BootloaderSimpleUpdateResponse,
     BootloaderStartUpdateResponse,
+    BootloaderStoredCrcResponse,
     BootloaderVerifyCrcResponse,
     BootloaderWriteChunkResponse,
     CanFrame,
@@ -51,6 +56,10 @@ from models import (
 from protocol import (
     BOOTLOADER_REQUEST_ID_BASE,
     BOOTLOADER_RESPONSE_ID_BASE,
+    BOOTLOADER_METADATA_STATE_BLANK,
+    BOOTLOADER_METADATA_STATE_IN_PROGRESS,
+    BOOTLOADER_METADATA_STATE_INVALID,
+    BOOTLOADER_METADATA_STATE_VALID,
     BOOTLOADER_RESP_ABORT_UPDATE,
     BOOTLOADER_RESP_FINISH_UPDATE,
     BOOTLOADER_RESP_RESET_TO_APP,
@@ -66,12 +75,17 @@ from protocol import (
     NODE_ID_MAX,
     bootloader_update_response_name,
     counter_id_to_name,
+    decode_bootloader_app_size_info_frame,
+    decode_bootloader_app_status_summary_frame,
+    decode_bootloader_computed_crc_frame,
     decode_bootloader_erase_app_frame,
     decode_bootloader_flash_layout_frame,
     decode_bootloader_flash_self_test_frame,
     decode_bootloader_info_frame,
+    decode_bootloader_metadata_version_frame,
     decode_bootloader_simple_update_frame,
     decode_bootloader_start_update_frame,
+    decode_bootloader_stored_crc_frame,
     decode_bootloader_verify_crc_frame,
     decode_bootloader_write_chunk_frame,
     decode_diag_response_frame,
@@ -122,6 +136,7 @@ class MainWindow(QMainWindow):
 
         self.group_checks: list[QCheckBox] = []
         self.status_labels: dict[str, QLabel] = {}
+        self.boot_status_labels: dict[str, QLabel] = {}
         self.group_status_labels: list[dict[str, QLabel]] = []
         self.diag_group_items: dict[tuple[int, int], QTableWidgetItem] = {}
         self.diag_global_items: dict[int, QTableWidgetItem] = {}
@@ -269,6 +284,8 @@ class MainWindow(QMainWindow):
         self.boot_info_button.clicked.connect(self.get_boot_info)
         self.flash_layout_button = QPushButton("Get Flash Layout")
         self.flash_layout_button.clicked.connect(self.get_flash_layout)
+        self.refresh_boot_status_button = QPushButton("Refresh Bootloader Status")
+        self.refresh_boot_status_button.clicked.connect(self.refresh_bootloader_status)
         self.flash_self_test_button = QPushButton("Run Flash Self-Test")
         self.flash_self_test_button.clicked.connect(lambda: self.run_flash_self_test())
         self.flash_self_test_button.setEnabled(False)
@@ -301,7 +318,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.bootloader_button, 0, 0)
         layout.addWidget(self.boot_info_button, 0, 1)
         layout.addWidget(self.flash_layout_button, 0, 2)
-        layout.addWidget(self.flash_self_test_button, 0, 3)
+        layout.addWidget(self.refresh_boot_status_button, 0, 3)
+        layout.addWidget(self.flash_self_test_button, 0, 4)
         layout.addWidget(self.select_app_bin_button, 1, 0)
         layout.addWidget(self.start_update_button, 1, 1)
         layout.addWidget(self.abort_update_button, 1, 2)
@@ -317,6 +335,35 @@ class MainWindow(QMainWindow):
         layout.addWidget(QLabel("Stop After N Chunks"), 6, 1)
         layout.addWidget(self.stop_after_chunks_spin, 6, 2)
         layout.addWidget(self.force_bad_crc_check, 6, 3)
+
+        boot_status_fields = [
+            ("bootloader_version", "Bootloader Version"),
+            ("mode", "Mode"),
+            ("app_version", "App Version"),
+            ("app_valid", "App Valid"),
+            ("vector_valid", "Vector Valid"),
+            ("metadata_state", "Metadata State"),
+            ("metadata_version", "Metadata Version"),
+            ("app_size", "App Size"),
+            ("max_app_size", "Max App Size"),
+            ("stored_crc32", "Stored CRC32"),
+            ("computed_crc32", "Computed CRC32"),
+            ("crc_match", "CRC Match"),
+            ("info_source", "Info Source"),
+            ("session_state", "Session State"),
+            ("recovery_hint", "Recovery Hint"),
+        ]
+        for index, (key, title) in enumerate(boot_status_fields):
+            row = 7 + (index // 2)
+            column = (index % 2) * 2
+            label = QLabel("-")
+            self.boot_status_labels[key] = label
+            if key == "recovery_hint":
+                layout.addWidget(QLabel(title), row, 0)
+                layout.addWidget(label, row, 1, 1, 4)
+            else:
+                layout.addWidget(QLabel(title), row, column)
+                layout.addWidget(label, row, column + 1)
         return box
 
     def _build_status_section(self) -> QGroupBox:
@@ -566,6 +613,16 @@ class MainWindow(QMainWindow):
         self.controller.flash_layout_response_history.clear()
         self.controller.last_flash_self_test_response = None
         self.controller.flash_self_test_response_history.clear()
+        self.controller.last_app_status_summary_response = None
+        self.controller.app_status_summary_response_history.clear()
+        self.controller.last_app_size_info_response = None
+        self.controller.app_size_info_response_history.clear()
+        self.controller.last_stored_crc_response = None
+        self.controller.stored_crc_response_history.clear()
+        self.controller.last_computed_crc_response = None
+        self.controller.computed_crc_response_history.clear()
+        self.controller.last_metadata_version_response = None
+        self.controller.metadata_version_response_history.clear()
         self.controller.last_start_update_response = None
         self.controller.start_update_response_history.clear()
         self.controller.last_erase_app_response = None
@@ -597,6 +654,7 @@ class MainWindow(QMainWindow):
         self.bootloader_button.setEnabled(connected and not self.update_in_progress)
         self.boot_info_button.setEnabled(connected and not self.update_in_progress)
         self.flash_layout_button.setEnabled(connected and not self.update_in_progress)
+        self.refresh_boot_status_button.setEnabled(connected and not self.update_in_progress)
         self.flash_self_test_button.setEnabled(False)
         self.select_app_bin_button.setEnabled(not self.update_in_progress)
         self.start_update_button.setEnabled(
@@ -758,6 +816,178 @@ class MainWindow(QMainWindow):
         self.poll_rx()
         return frame
 
+    def request_bootloader_response(
+        self,
+        name: str,
+        send_func,
+        history: list,
+        timeout_ms: int,
+        log_missing: bool = True,
+    ) -> object | None:
+        before = len(history)
+        try:
+            frame = send_func()
+        except Exception as exc:
+            self.log_message(f"ERROR {name}: {exc}")
+            return None
+
+        self.log_frame("TX", frame)
+        response = self.wait_for_history_item(history, before, timeout_ms)
+        if response is None and log_missing:
+            self.log_message(f"No response for {name}.")
+        return response
+
+    def refresh_bootloader_status(self) -> None:
+        if self.update_in_progress:
+            self.log_message("Refresh Bootloader Status ignored: firmware update is running.")
+            return
+
+        if not self.ensure_connected():
+            return
+
+        self.clear_bootloader_status_display()
+        boot_info = self.request_bootloader_response(
+            "GET_BOOT_INFO",
+            self.controller.send_get_boot_info,
+            self.controller.boot_info_response_history,
+            1500,
+            log_missing=False,
+        )
+        if not isinstance(boot_info, BootloaderInfoResponse):
+            self.log_message("No bootloader response. Enter bootloader first.")
+            return
+
+        if boot_info.boot_mode_text == "BOOTLOADER" and self.update_state in {"IDLE", "BOOTLOADER_MODE"}:
+            self.set_update_state("BOOTLOADER_MODE")
+
+        self.request_bootloader_response(
+            "GET_APP_STATUS_SUMMARY",
+            self.controller.send_get_app_status_summary,
+            self.controller.app_status_summary_response_history,
+            1500,
+        )
+        self.request_bootloader_response(
+            "GET_APP_SIZE_INFO",
+            self.controller.send_get_app_size_info,
+            self.controller.app_size_info_response_history,
+            1500,
+        )
+        self.request_bootloader_response(
+            "GET_APP_STORED_CRC",
+            self.controller.send_get_app_stored_crc,
+            self.controller.stored_crc_response_history,
+            1500,
+        )
+        self.request_bootloader_response(
+            "CHECK_APP_FLASH_CRC",
+            self.controller.send_check_app_flash_crc,
+            self.controller.computed_crc_response_history,
+            5000,
+        )
+        self.request_bootloader_response(
+            "GET_METADATA_VERSION_INFO",
+            self.controller.send_get_metadata_version_info,
+            self.controller.metadata_version_response_history,
+            1500,
+        )
+        self.update_bootloader_status_display()
+
+    def clear_bootloader_status_display(self) -> None:
+        for label in self.boot_status_labels.values():
+            label.setText("-")
+        self.controller.last_boot_info_response = None
+        self.controller.last_app_status_summary_response = None
+        self.controller.last_app_size_info_response = None
+        self.controller.last_stored_crc_response = None
+        self.controller.last_computed_crc_response = None
+        self.controller.last_metadata_version_response = None
+
+    def update_bootloader_status_display(self) -> None:
+        boot_info = self.controller.last_boot_info_response
+        app_status = self.controller.last_app_status_summary_response
+        size_info = self.controller.last_app_size_info_response
+        stored_crc = self.controller.last_stored_crc_response
+        computed_crc = self.controller.last_computed_crc_response
+        metadata_version = self.controller.last_metadata_version_response
+
+        if boot_info is not None:
+            self.boot_status_labels["bootloader_version"].setText(
+                f"{boot_info.bl_major}.{boot_info.bl_minor}"
+            )
+            self.boot_status_labels["mode"].setText(boot_info.boot_mode_text)
+            self.boot_status_labels["app_valid"].setText(self.format_bool(boot_info.app_valid))
+
+        self.boot_status_labels["app_version"].setText("N/A")
+
+        if app_status is not None:
+            self.boot_status_labels["app_valid"].setText(self.format_bool(app_status.app_valid))
+            self.boot_status_labels["vector_valid"].setText(self.format_bool(app_status.vector_valid))
+            self.boot_status_labels["metadata_state"].setText(app_status.metadata_state_text)
+            self.boot_status_labels["info_source"].setText(app_status.info_source_text)
+            self.boot_status_labels["session_state"].setText(app_status.session_state_text)
+            self.reset_to_app_allowed = app_status.app_valid
+            self.update_connected_state()
+
+        if size_info is not None:
+            self.boot_status_labels["app_size"].setText(
+                f"{size_info.app_size} bytes" if size_info.size_available else "N/A"
+            )
+            self.boot_status_labels["max_app_size"].setText(f"{size_info.max_app_kb} KB")
+
+        if stored_crc is not None:
+            self.boot_status_labels["stored_crc32"].setText(
+                f"0x{stored_crc.stored_crc32:08X}" if stored_crc.crc_available else "NONE"
+            )
+
+        if computed_crc is not None:
+            if computed_crc.crc_available:
+                self.boot_status_labels["computed_crc32"].setText(f"0x{computed_crc.computed_crc32:08X}")
+                self.boot_status_labels["crc_match"].setText(self.format_bool(computed_crc.crc_match))
+            else:
+                self.boot_status_labels["computed_crc32"].setText(computed_crc.status_text)
+                self.boot_status_labels["crc_match"].setText("N/A")
+
+        if metadata_version is not None:
+            self.boot_status_labels["metadata_version"].setText(
+                self.format_version(metadata_version.metadata_version)
+                if metadata_version.version_available
+                else "N/A"
+            )
+
+        self.boot_status_labels["recovery_hint"].setText(self.bootloader_recovery_hint())
+
+    def bootloader_recovery_hint(self) -> str:
+        app_status = self.controller.last_app_status_summary_response
+        computed_crc = self.controller.last_computed_crc_response
+
+        if app_status is None:
+            return "-"
+
+        if app_status.metadata_state == BOOTLOADER_METADATA_STATE_IN_PROGRESS:
+            return "Update was interrupted. Start firmware update again."
+
+        if app_status.metadata_state == BOOTLOADER_METADATA_STATE_INVALID:
+            return "App is invalid. Start firmware update again."
+
+        if app_status.metadata_state == BOOTLOADER_METADATA_STATE_BLANK and app_status.vector_valid:
+            return "Legacy app detected. App can boot, but metadata is not written yet."
+
+        if computed_crc is not None and computed_crc.crc_available and not computed_crc.crc_match:
+            return "Stored CRC does not match Flash. Do not reset to app; update again."
+
+        if app_status.metadata_state == BOOTLOADER_METADATA_STATE_VALID and app_status.app_valid:
+            return "Reset To App is allowed."
+
+        return "Start firmware update again."
+
+    def format_bool(self, value: bool) -> str:
+        return "Yes" if value else "No"
+
+    def format_version(self, version: int) -> str:
+        major = (version >> 16) & 0xFFFF
+        minor = version & 0xFFFF
+        return f"{major}.{minor}"
+
     def run_flash_self_test(self, confirm: bool = True) -> CanFrame | None:
         _ = confirm
         self.log_message("Flash self-test disabled: metadata page 0x0800FC00 is used by firmware update.")
@@ -897,6 +1127,7 @@ class MainWindow(QMainWindow):
         self.set_update_state("UPDATING")
         self.update_connected_state()
         self.update_progress.setValue(0)
+        auto_refresh_status = False
 
         try:
             self.run_update_sequence(info, self.selected_app_bin_data)
@@ -904,10 +1135,12 @@ class MainWindow(QMainWindow):
             self.reset_to_app_allowed = True
             self.set_update_state("DONE")
             self.log_message("FIRMWARE_UPDATE DONE. Use Reset To App or reset/power cycle the board.")
+            auto_refresh_status = True
         except FirmwareUpdateAborted:
             self.reset_to_app_allowed = False
             self.set_update_state("ABORTED")
             self.log_message("Firmware update stopped after user abort.")
+            auto_refresh_status = True
         except FirmwareUpdateStoppedForTest as exc:
             self.reset_to_app_allowed = False
             self.set_update_state("FAILED")
@@ -917,9 +1150,12 @@ class MainWindow(QMainWindow):
             self.set_update_state("FAILED")
             self.log_message(f"ERROR firmware update stopped: {exc}")
             QMessageBox.warning(self, "Firmware update stopped", str(exc))
+            auto_refresh_status = True
         finally:
             self.update_in_progress = False
             self.update_connected_state()
+            if auto_refresh_status and self.controller.connected and self.driver.is_open():
+                self.refresh_bootloader_status()
 
     def stop_if_abort_requested(self, stage_name: str) -> None:
         if self.update_abort_requested:
@@ -1467,6 +1703,51 @@ class MainWindow(QMainWindow):
             return (
                 f" FLASH_TEST=FAIL STATUS={flash_self_test.status_text} "
                 f"STAGE={flash_self_test.stage_text} DETAIL={format_hex_data(flash_self_test.detail)}"
+            )
+
+        app_status = decode_bootloader_app_status_summary_frame(frame, self.controller.node_id)
+        if isinstance(app_status, BootloaderAppStatusSummaryResponse):
+            return (
+                f" APP_STATUS STATUS={app_status.status_text} META={app_status.metadata_state_text} "
+                f"APP_VALID={1 if app_status.app_valid else 0} "
+                f"VECTOR_VALID={1 if app_status.vector_valid else 0} "
+                f"SOURCE={app_status.info_source_text} SESSION={app_status.session_state_text}"
+            )
+
+        app_size = decode_bootloader_app_size_info_frame(frame, self.controller.node_id)
+        if isinstance(app_size, BootloaderAppSizeInfoResponse):
+            size_text = str(app_size.app_size) if app_size.size_available else "N/A"
+            return (
+                f" APP_SIZE STATUS={app_size.status_text} SIZE={size_text} "
+                f"MAX={app_size.max_app_kb}KB"
+            )
+
+        stored_crc = decode_bootloader_stored_crc_frame(frame, self.controller.node_id)
+        if isinstance(stored_crc, BootloaderStoredCrcResponse):
+            crc_text = f"0x{stored_crc.stored_crc32:08X}" if stored_crc.crc_available else "NONE"
+            return (
+                f" STORED_CRC STATUS={stored_crc.status_text} CRC={crc_text} "
+                f"SOURCE={stored_crc.crc_source_text}"
+            )
+
+        computed_crc = decode_bootloader_computed_crc_frame(frame, self.controller.node_id)
+        if isinstance(computed_crc, BootloaderComputedCrcResponse):
+            crc_text = f"0x{computed_crc.computed_crc32:08X}" if computed_crc.crc_available else "N/A"
+            return (
+                f" FLASH_CRC STATUS={computed_crc.status_text} CRC={crc_text} "
+                f"MATCH={1 if computed_crc.crc_match else 0}"
+            )
+
+        metadata_version = decode_bootloader_metadata_version_frame(frame, self.controller.node_id)
+        if isinstance(metadata_version, BootloaderMetadataVersionResponse):
+            version_text = (
+                self.format_version(metadata_version.metadata_version)
+                if metadata_version.version_available
+                else "N/A"
+            )
+            return (
+                f" METADATA_VERSION STATUS={metadata_version.status_text} "
+                f"VERSION={version_text} MAGIC_OK={1 if metadata_version.magic_ok else 0}"
             )
 
         start_update = decode_bootloader_start_update_frame(frame, self.controller.node_id)

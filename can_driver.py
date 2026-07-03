@@ -9,15 +9,22 @@ from models import CanFrame
 from protocol import (
     APP_MAX_SIZE_BYTES,
     BOOTLOADER_CMD_ABORT_UPDATE,
+    BOOTLOADER_CMD_CHECK_APP_FLASH_CRC,
     BOOTLOADER_CMD_ERASE_APP,
     BOOTLOADER_CMD_FINISH_UPDATE,
+    BOOTLOADER_CMD_GET_APP_SIZE_INFO,
+    BOOTLOADER_CMD_GET_APP_STATUS_SUMMARY,
+    BOOTLOADER_CMD_GET_APP_STORED_CRC,
     BOOTLOADER_CMD_GET_FLASH_LAYOUT,
     BOOTLOADER_CMD_GET_BOOT_INFO,
+    BOOTLOADER_CMD_GET_METADATA_VERSION_INFO,
     BOOTLOADER_CMD_RESET_TO_APP,
     BOOTLOADER_CMD_RUN_FLASH_SELF_TEST,
     BOOTLOADER_CMD_START_UPDATE,
     BOOTLOADER_CMD_VERIFY_CRC,
     BOOTLOADER_CMD_WRITE_CHUNK,
+    BOOTLOADER_CRC_SOURCE_METADATA,
+    BOOTLOADER_CRC_SOURCE_NONE,
     BOOTLOADER_ENTER_MAGIC_1,
     BOOTLOADER_ENTER_MAGIC_2,
     BOOTLOADER_FLASH_STATUS_BAD_MAGIC,
@@ -27,10 +34,26 @@ from protocol import (
     BOOTLOADER_RESP_ERASE_APP,
     BOOTLOADER_RESP_FINISH_UPDATE,
     BOOTLOADER_RESP_GET_FLASH_LAYOUT,
+    BOOTLOADER_INFO_FLAG_COMPUTED_AVAILABLE,
+    BOOTLOADER_INFO_FLAG_CRC_MATCH,
+    BOOTLOADER_INFO_FLAG_STORED_AVAILABLE,
+    BOOTLOADER_INFO_FLAG_VALUE_AVAILABLE,
+    BOOTLOADER_INFO_SOURCE_LEGACY_BLANK,
+    BOOTLOADER_INFO_SOURCE_METADATA,
+    BOOTLOADER_INFO_SOURCE_NO_VALID_APP,
+    BOOTLOADER_METADATA_STATE_BLANK,
+    BOOTLOADER_METADATA_STATE_IN_PROGRESS,
+    BOOTLOADER_METADATA_STATE_INVALID,
+    BOOTLOADER_METADATA_STATE_VALID,
     BOOTLOADER_REQUEST_ID_BASE,
+    BOOTLOADER_RESP_APP_FLASH_CRC,
+    BOOTLOADER_RESP_APP_SIZE_INFO,
+    BOOTLOADER_RESP_APP_STATUS_SUMMARY,
+    BOOTLOADER_RESP_APP_STORED_CRC,
     BOOTLOADER_RESP_RESET_TO_APP,
     BOOTLOADER_RESP_GET_BOOT_INFO,
     BOOTLOADER_RESP_START_UPDATE,
+    BOOTLOADER_RESP_METADATA_VERSION_INFO,
     BOOTLOADER_RESP_VERIFY_CRC,
     BOOTLOADER_RESP_WRITE_CHUNK,
     BOOTLOADER_STATUS_OK,
@@ -129,6 +152,11 @@ class MockCanDriver(CanDriver):
         self._boot_update_expected_seq = 0
         self._boot_update_data = bytearray()
         self._boot_update_crc_ok = False
+        self._boot_flash_app_data = bytearray()
+        self._boot_metadata_state = BOOTLOADER_METADATA_STATE_BLANK
+        self._boot_metadata_version = 0x00010000
+        self._boot_metadata_app_size = 0
+        self._boot_metadata_crc32 = 0
         self._boot_app_valid = True
         self._reset_diag_counters()
 
@@ -290,6 +318,29 @@ class MockCanDriver(CanDriver):
             self._enqueue_flash_layout_response()
             return
 
+        if len(data) == 8 and command == BOOTLOADER_CMD_GET_APP_STATUS_SUMMARY:
+            self._enqueue_app_status_summary_response()
+            return
+
+        if len(data) == 8 and command == BOOTLOADER_CMD_GET_APP_SIZE_INFO:
+            self._enqueue_app_size_info_response()
+            return
+
+        if len(data) == 8 and command == BOOTLOADER_CMD_GET_APP_STORED_CRC:
+            self._enqueue_app_stored_crc_response()
+            return
+
+        if len(data) == 8 and command == BOOTLOADER_CMD_CHECK_APP_FLASH_CRC:
+            if data[1] != BOOTLOADER_ENTER_MAGIC_1 or data[2] != BOOTLOADER_ENTER_MAGIC_2:
+                self._enqueue_app_flash_crc_response(BOOTLOADER_UPDATE_STATUS_BAD_MAGIC)
+            else:
+                self._enqueue_app_flash_crc_response(BOOTLOADER_UPDATE_STATUS_OK)
+            return
+
+        if len(data) == 8 and command == BOOTLOADER_CMD_GET_METADATA_VERSION_INFO:
+            self._enqueue_metadata_version_response()
+            return
+
         if len(data) == 8 and command == BOOTLOADER_CMD_RUN_FLASH_SELF_TEST:
             if data[1] != BOOTLOADER_ENTER_MAGIC_1 or data[2] != BOOTLOADER_ENTER_MAGIC_2:
                 self._enqueue_flash_self_test_response(BOOTLOADER_FLASH_STATUS_BAD_MAGIC, 0)
@@ -347,7 +398,7 @@ class MockCanDriver(CanDriver):
         self._enqueue_rx_frame(diag_response_id(self._node_id), data)
 
     def _enqueue_boot_info_response(self) -> None:
-        data = bytes([BOOTLOADER_RESP_GET_BOOT_INFO, BOOTLOADER_STATUS_OK, 1, 0, 1 if self._boot_app_valid else 0, 1, 0, 0])
+        data = bytes([BOOTLOADER_RESP_GET_BOOT_INFO, BOOTLOADER_STATUS_OK, 1, 0, 1 if self._mock_app_valid() else 0, 1, 0, 0])
         self._enqueue_rx_frame(bootloader_response_id(self._node_id), data)
 
     def _enqueue_flash_layout_response(self) -> None:
@@ -358,12 +409,184 @@ class MockCanDriver(CanDriver):
         data = bytes([BOOTLOADER_RESP_FLASH_SELF_TEST, status, stage, 0, 0, 0, 0, 0])
         self._enqueue_rx_frame(bootloader_response_id(self._node_id), data)
 
+    def _enqueue_app_status_summary_response(self) -> None:
+        size_available = self._mock_metadata_size_available()
+        stored_available = self._mock_stored_crc_available()
+        computed_available = size_available
+        crc_match = self._mock_crc_match() if computed_available else False
+        flags = 0
+        if size_available:
+            flags |= BOOTLOADER_INFO_FLAG_VALUE_AVAILABLE
+        if stored_available:
+            flags |= BOOTLOADER_INFO_FLAG_STORED_AVAILABLE
+        if computed_available:
+            flags |= BOOTLOADER_INFO_FLAG_COMPUTED_AVAILABLE
+        if crc_match:
+            flags |= BOOTLOADER_INFO_FLAG_CRC_MATCH
+
+        data = bytes([
+            BOOTLOADER_RESP_APP_STATUS_SUMMARY,
+            BOOTLOADER_UPDATE_STATUS_OK,
+            self._boot_metadata_state,
+            1 if self._mock_app_valid() else 0,
+            1 if self._mock_vector_valid() else 0,
+            self._mock_info_source(),
+            self._boot_update_state,
+            flags,
+        ])
+        self._enqueue_rx_frame(bootloader_response_id(self._node_id), data)
+
+    def _enqueue_app_size_info_response(self) -> None:
+        size_available = self._mock_metadata_size_available()
+        app_size = self._boot_metadata_app_size if size_available else 0
+        flags = BOOTLOADER_INFO_FLAG_VALUE_AVAILABLE if size_available else 0
+        data = bytes([
+            BOOTLOADER_RESP_APP_SIZE_INFO,
+            BOOTLOADER_UPDATE_STATUS_OK,
+            *app_size.to_bytes(4, "little"),
+            APP_MAX_SIZE_BYTES // 1024,
+            flags,
+        ])
+        self._enqueue_rx_frame(bootloader_response_id(self._node_id), data)
+
+    def _enqueue_app_stored_crc_response(self) -> None:
+        crc_available = self._mock_stored_crc_available()
+        stored_crc = self._boot_metadata_crc32 if crc_available else 0
+        crc_source = BOOTLOADER_CRC_SOURCE_METADATA if crc_available else BOOTLOADER_CRC_SOURCE_NONE
+        flags = BOOTLOADER_INFO_FLAG_VALUE_AVAILABLE if crc_available else 0
+        data = bytes([
+            BOOTLOADER_RESP_APP_STORED_CRC,
+            BOOTLOADER_UPDATE_STATUS_OK,
+            *stored_crc.to_bytes(4, "little"),
+            crc_source,
+            flags,
+        ])
+        self._enqueue_rx_frame(bootloader_response_id(self._node_id), data)
+
+    def _enqueue_app_flash_crc_response(self, status: int) -> None:
+        size_available = self._mock_metadata_size_available()
+        response_status = status
+        computed_crc = 0
+        crc_match = False
+        flags = 0
+
+        if status == BOOTLOADER_UPDATE_STATUS_OK:
+            if not size_available:
+                response_status = BOOTLOADER_UPDATE_STATUS_SIZE_ERROR
+            else:
+                computed_crc = self._mock_computed_crc()
+                crc_match = computed_crc == self._boot_metadata_crc32
+                flags |= BOOTLOADER_INFO_FLAG_VALUE_AVAILABLE | BOOTLOADER_INFO_FLAG_COMPUTED_AVAILABLE
+                if self._mock_stored_crc_available():
+                    flags |= BOOTLOADER_INFO_FLAG_STORED_AVAILABLE
+                if crc_match:
+                    flags |= BOOTLOADER_INFO_FLAG_CRC_MATCH
+
+        data = bytes([
+            BOOTLOADER_RESP_APP_FLASH_CRC,
+            response_status,
+            *computed_crc.to_bytes(4, "little"),
+            1 if crc_match else 0,
+            flags,
+        ])
+        self._enqueue_rx_frame(bootloader_response_id(self._node_id), data)
+
+    def _enqueue_metadata_version_response(self) -> None:
+        version_available = self._boot_metadata_state != BOOTLOADER_METADATA_STATE_BLANK
+        metadata_version = self._boot_metadata_version if version_available else 0
+        magic_ok = self._boot_metadata_state != BOOTLOADER_METADATA_STATE_BLANK
+        flags = BOOTLOADER_INFO_FLAG_VALUE_AVAILABLE if version_available else 0
+        data = bytes([
+            BOOTLOADER_RESP_METADATA_VERSION_INFO,
+            BOOTLOADER_UPDATE_STATUS_OK,
+            *metadata_version.to_bytes(4, "little"),
+            1 if magic_ok else 0,
+            flags,
+        ])
+        self._enqueue_rx_frame(bootloader_response_id(self._node_id), data)
+
+    def _mock_metadata_size_available(self) -> bool:
+        return (
+            self._boot_metadata_state in {
+                BOOTLOADER_METADATA_STATE_VALID,
+                BOOTLOADER_METADATA_STATE_IN_PROGRESS,
+                BOOTLOADER_METADATA_STATE_INVALID,
+            } and
+            8 < self._boot_metadata_app_size <= APP_MAX_SIZE_BYTES
+        )
+
+    def _mock_stored_crc_available(self) -> bool:
+        return self._boot_metadata_state in {
+            BOOTLOADER_METADATA_STATE_VALID,
+            BOOTLOADER_METADATA_STATE_IN_PROGRESS,
+            BOOTLOADER_METADATA_STATE_INVALID,
+        }
+
+    def _mock_padded_flash_app_data(self) -> bytes:
+        if not self._mock_metadata_size_available():
+            return bytes(self._boot_flash_app_data)
+        app_data = bytes(self._boot_flash_app_data[:self._boot_metadata_app_size])
+        if len(app_data) < self._boot_metadata_app_size:
+            app_data += b"\xFF" * (self._boot_metadata_app_size - len(app_data))
+        return app_data
+
+    def _mock_computed_crc(self) -> int:
+        return crc32_ieee(self._mock_padded_flash_app_data())
+
+    def _mock_crc_match(self) -> bool:
+        return self._mock_stored_crc_available() and self._mock_computed_crc() == self._boot_metadata_crc32
+
+    def _mock_vector_valid(self) -> bool:
+        app_data = bytes(self._boot_flash_app_data)
+        if len(app_data) < 8:
+            return False
+        initial_sp = int.from_bytes(app_data[0:4], "little")
+        reset_handler = int.from_bytes(app_data[4:8], "little")
+        reset_address = reset_handler & ~1
+        return (
+            0x20000000 <= initial_sp <= 0x20005000 and
+            (initial_sp & 0x3) == 0 and
+            (reset_handler & 1) != 0 and
+            0x08004000 <= reset_address <= 0x0800FBFF
+        )
+
+    def _mock_app_valid(self) -> bool:
+        return (
+            self._boot_metadata_state == BOOTLOADER_METADATA_STATE_VALID and
+            self._mock_metadata_size_available() and
+            self._mock_vector_valid() and
+            self._mock_crc_match()
+        )
+
+    def _mock_info_source(self) -> int:
+        if self._boot_metadata_state == BOOTLOADER_METADATA_STATE_BLANK:
+            if self._mock_vector_valid():
+                return BOOTLOADER_INFO_SOURCE_LEGACY_BLANK
+            return BOOTLOADER_INFO_SOURCE_NO_VALID_APP
+        if self._boot_metadata_state in {
+            BOOTLOADER_METADATA_STATE_VALID,
+            BOOTLOADER_METADATA_STATE_IN_PROGRESS,
+            BOOTLOADER_METADATA_STATE_INVALID,
+        }:
+            return BOOTLOADER_INFO_SOURCE_METADATA
+        return BOOTLOADER_INFO_SOURCE_NO_VALID_APP
+
     def _reset_bootloader_update_state(self) -> None:
+        default_app = (
+            (0x20001000).to_bytes(4, "little") +
+            (0x08004101).to_bytes(4, "little") +
+            bytes(range(56))
+        )
         self._boot_update_state = BOOTLOADER_UPDATE_STATE_IDLE
         self._boot_update_app_size = 0
         self._boot_update_expected_seq = 0
         self._boot_update_data = bytearray()
         self._boot_update_crc_ok = False
+        self._boot_flash_app_data = bytearray(default_app)
+        self._boot_metadata_state = BOOTLOADER_METADATA_STATE_VALID
+        self._boot_metadata_version = 0x00010000
+        self._boot_metadata_app_size = len(default_app)
+        self._boot_metadata_crc32 = crc32_ieee(default_app)
         self._boot_app_valid = True
 
     def _has_boot_magic(self, data: bytes) -> bool:
@@ -390,6 +613,9 @@ class MockCanDriver(CanDriver):
         self._boot_update_expected_seq = 0
         self._boot_update_data = bytearray()
         self._boot_update_crc_ok = False
+        self._boot_metadata_state = BOOTLOADER_METADATA_STATE_IN_PROGRESS
+        self._boot_metadata_app_size = app_size
+        self._boot_metadata_crc32 = 0xFFFFFFFF
         self._boot_app_valid = False
         self._enqueue_start_update_response(BOOTLOADER_UPDATE_STATUS_OK, app_size)
 
@@ -405,6 +631,7 @@ class MockCanDriver(CanDriver):
         erased_pages = (self._boot_update_app_size + 1023) // 1024
         self._boot_update_state = BOOTLOADER_UPDATE_STATE_ERASED
         self._boot_update_data = bytearray()
+        self._boot_flash_app_data = bytearray()
         self._enqueue_erase_app_response(BOOTLOADER_UPDATE_STATUS_OK, erased_pages)
 
     def _handle_write_chunk(self, data: bytes) -> None:
@@ -432,6 +659,7 @@ class MockCanDriver(CanDriver):
             return
 
         self._boot_update_data.extend(payload)
+        self._boot_flash_app_data = bytearray(self._boot_update_data)
         self._boot_update_expected_seq += 1
         if len(self._boot_update_data) == self._boot_update_app_size:
             self._boot_update_state = BOOTLOADER_UPDATE_STATE_WRITE_COMPLETE
@@ -471,6 +699,10 @@ class MockCanDriver(CanDriver):
             return
 
         self._boot_update_state = BOOTLOADER_UPDATE_STATE_FINISHED
+        self._boot_flash_app_data = bytearray(self._boot_update_data)
+        self._boot_metadata_state = BOOTLOADER_METADATA_STATE_VALID
+        self._boot_metadata_app_size = self._boot_update_app_size
+        self._boot_metadata_crc32 = crc32_ieee(bytes(self._boot_update_data))
         self._boot_app_valid = True
         self._enqueue_simple_update_response(BOOTLOADER_RESP_FINISH_UPDATE, BOOTLOADER_UPDATE_STATUS_OK)
 
@@ -490,6 +722,8 @@ class MockCanDriver(CanDriver):
             return
 
         self._boot_update_state = BOOTLOADER_UPDATE_STATE_ERROR
+        self._boot_metadata_state = BOOTLOADER_METADATA_STATE_INVALID
+        self._boot_metadata_crc32 = 0
         self._boot_app_valid = False
         self._enqueue_simple_update_response(BOOTLOADER_RESP_ABORT_UPDATE, BOOTLOADER_UPDATE_STATUS_OK)
 
@@ -498,7 +732,7 @@ class MockCanDriver(CanDriver):
             self._enqueue_simple_update_response(BOOTLOADER_RESP_RESET_TO_APP, BOOTLOADER_UPDATE_STATUS_BAD_MAGIC)
             return
 
-        status = BOOTLOADER_UPDATE_STATUS_OK if self._boot_app_valid else BOOTLOADER_UPDATE_STATUS_APP_INVALID
+        status = BOOTLOADER_UPDATE_STATUS_OK if self._mock_app_valid() else BOOTLOADER_UPDATE_STATUS_APP_INVALID
         self._enqueue_simple_update_response(BOOTLOADER_RESP_RESET_TO_APP, status)
 
     def _enqueue_start_update_response(self, status: int, app_size: int) -> None:

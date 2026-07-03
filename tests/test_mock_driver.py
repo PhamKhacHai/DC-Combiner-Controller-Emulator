@@ -172,6 +172,45 @@ def test_controller_run_flash_self_test_receives_mock_response() -> None:
     assert controller.last_flash_self_test_response.stage_text == "DONE"
 
 
+def test_controller_refresh_bootloader_status_info_receives_mock_responses() -> None:
+    driver = MockCanDriver()
+    controller = ControllerSimulator(driver)
+    controller.connect("Mock CAN Device")
+    controller.poll_rx()
+    controller.set_node_id(3)
+
+    controller.send_get_app_status_summary()
+    controller.poll_rx()
+    assert controller.last_app_status_summary_response is not None
+    assert controller.last_app_status_summary_response.metadata_state_text == "VALID"
+    assert controller.last_app_status_summary_response.app_valid is True
+    assert controller.last_app_status_summary_response.info_source_text == "METADATA"
+
+    controller.send_get_app_size_info()
+    controller.poll_rx()
+    assert controller.last_app_size_info_response is not None
+    assert controller.last_app_size_info_response.size_available is True
+    assert controller.last_app_size_info_response.max_app_kb == 47
+
+    controller.send_get_app_stored_crc()
+    controller.poll_rx()
+    assert controller.last_stored_crc_response is not None
+    assert controller.last_stored_crc_response.crc_available is True
+    assert controller.last_stored_crc_response.crc_source_text == "METADATA"
+
+    controller.send_check_app_flash_crc()
+    controller.poll_rx()
+    assert controller.last_computed_crc_response is not None
+    assert controller.last_computed_crc_response.status_text == "OK"
+    assert controller.last_computed_crc_response.crc_match is True
+
+    controller.send_get_metadata_version_info()
+    controller.poll_rx()
+    assert controller.last_metadata_version_response is not None
+    assert controller.last_metadata_version_response.metadata_version == 0x00010000
+    assert controller.last_metadata_version_response.magic_ok is True
+
+
 def test_mock_driver_accepts_firmware_update_flow() -> None:
     driver = MockCanDriver()
     controller = ControllerSimulator(driver)
@@ -241,6 +280,12 @@ def test_mock_driver_abort_update_active_session_returns_ok() -> None:
 
     assert controller.last_simple_update_response is not None
     assert controller.last_simple_update_response.status_text == "OK"
+
+    controller.send_get_app_status_summary()
+    controller.poll_rx()
+    assert controller.last_app_status_summary_response is not None
+    assert controller.last_app_status_summary_response.metadata_state_text == "INVALID"
+    assert controller.last_app_status_summary_response.app_valid is False
 
     controller.send_reset_to_app()
     controller.poll_rx()
@@ -314,6 +359,18 @@ def test_mock_driver_crc_mismatch_blocks_finish_reset_and_allows_retry() -> None
     controller.poll_rx()
     assert controller.last_verify_crc_response is not None
     assert controller.last_verify_crc_response.status_text == "CRC_MISMATCH"
+
+    controller.send_get_app_status_summary()
+    controller.poll_rx()
+    assert controller.last_app_status_summary_response is not None
+    assert controller.last_app_status_summary_response.metadata_state_text == "IN_PROGRESS"
+    assert controller.last_app_status_summary_response.app_valid is False
+
+    controller.send_check_app_flash_crc()
+    controller.poll_rx()
+    assert controller.last_computed_crc_response is not None
+    assert controller.last_computed_crc_response.status_text == "OK"
+    assert controller.last_computed_crc_response.crc_match is False
 
     controller.send_finish_update()
     controller.poll_rx()

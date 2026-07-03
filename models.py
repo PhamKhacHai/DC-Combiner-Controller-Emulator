@@ -101,6 +101,67 @@ class BootloaderFlashSelfTestResponse:
 
 
 @dataclass(slots=True)
+class BootloaderAppStatusSummaryResponse:
+    response_type: int
+    status: int
+    status_text: str
+    metadata_state: int
+    metadata_state_text: str
+    app_valid: bool
+    vector_valid: bool
+    info_source: int
+    info_source_text: str
+    session_state: int
+    session_state_text: str
+    flags: int
+
+
+@dataclass(slots=True)
+class BootloaderAppSizeInfoResponse:
+    response_type: int
+    status: int
+    status_text: str
+    app_size: int
+    max_app_kb: int
+    flags: int
+    size_available: bool
+
+
+@dataclass(slots=True)
+class BootloaderStoredCrcResponse:
+    response_type: int
+    status: int
+    status_text: str
+    stored_crc32: int
+    crc_source: int
+    crc_source_text: str
+    flags: int
+    crc_available: bool
+
+
+@dataclass(slots=True)
+class BootloaderComputedCrcResponse:
+    response_type: int
+    status: int
+    status_text: str
+    computed_crc32: int
+    crc_match: bool
+    flags: int
+    crc_available: bool
+
+
+@dataclass(slots=True)
+class BootloaderMetadataVersionResponse:
+    response_type: int
+    status: int
+    status_text: str
+    metadata_version: int
+    magic_ok: bool
+    flags: int
+    version_available: bool
+
+
+@dataclass(slots=True)
 class BootloaderStartUpdateResponse:
     response_type: int
     status: int

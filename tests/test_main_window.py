@@ -434,6 +434,56 @@ def test_get_flash_layout_sends_request_and_logs_response() -> None:
         app.processEvents()
 
 
+def test_refresh_bootloader_status_updates_info_labels() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+
+    try:
+        window.connect_can()
+        window.poll_rx()
+        window.node_spin.setValue(4)
+
+        window.refresh_bootloader_status()
+
+        sent_commands = [frame.data[0] for frame in window.driver.tx_frames if frame.data]
+        assert sent_commands[-6:] == [0x11, 0x13, 0x14, 0x15, 0x16, 0x17]
+        assert window.boot_status_labels["bootloader_version"].text() == "1.0"
+        assert window.boot_status_labels["mode"].text() == "BOOTLOADER"
+        assert window.boot_status_labels["app_valid"].text() == "Yes"
+        assert window.boot_status_labels["vector_valid"].text() == "Yes"
+        assert window.boot_status_labels["metadata_state"].text() == "VALID"
+        assert window.boot_status_labels["metadata_version"].text() == "1.0"
+        assert window.boot_status_labels["crc_match"].text() == "Yes"
+        assert window.boot_status_labels["recovery_hint"].text() == "Reset To App is allowed."
+        assert "APP_STATUS STATUS=OK META=VALID" in window.log_text.toPlainText()
+        assert "FLASH_CRC STATUS=OK" in window.log_text.toPlainText()
+    finally:
+        window.rx_timer.stop()
+        window.close()
+        app.processEvents()
+
+
+def test_refresh_bootloader_status_no_response_logs_light_message() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow()
+
+    try:
+        window.connect_can()
+        window.poll_rx()
+        window.wait_for_history_item = lambda history, start_count, timeout_ms: None
+
+        window.refresh_bootloader_status()
+
+        log_text = window.log_text.toPlainText()
+        assert "No bootloader response. Enter bootloader first." in log_text
+        assert "No response for GET_APP_STATUS_SUMMARY" not in log_text
+        assert window.boot_status_labels["bootloader_version"].text() == "-"
+    finally:
+        window.rx_timer.stop()
+        window.close()
+        app.processEvents()
+
+
 def test_run_flash_self_test_sends_request_and_logs_response() -> None:
     app = QApplication.instance() or QApplication([])
     window = MainWindow()
